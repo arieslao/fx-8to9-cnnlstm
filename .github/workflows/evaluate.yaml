@@ -6,13 +6,25 @@ on:
     # Weekdays at 04:00 UTC (adjust as desired)
     - cron: "0 4 * * 1-5"
 
+permissions:
+  contents: read
+
 jobs:
   evaluate:
     runs-on: ubuntu-latest
+    env:
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      TF_CPP_MIN_LOG_LEVEL: "2"
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Artifact scaffold
+        run: |
+          mkdir -p artifacts
+          echo "evaluate start $(date -u +%FT%TZ)" > artifacts/hello.txt
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -24,26 +36,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Set FX env
+      - name: Export env (FX_TICKERS)
         env:
           FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
         run: |
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
+          echo "Using pairs: ${FX_TICKERS}"
+
+      - name: Verify model exists
+        run: |
+          test -f models/cnn_lstm_fx.h5 || (echo 'Model missing: models/cnn_lstm_fx.h5. Run the Train workflow first.' && exit 1)
 
       - name: Run evaluation
         run: |
-          mkdir -p artifacts
-          # Save printed JSON metrics to a file and also show in logs
-          python -m src.evaluate | tee artifacts/eval_metrics.json
+          python -m src.evaluate 2>&1 | tee artifacts/eval_metrics.json
 
       - name: Add metrics to job summary
         if: always()
         run: |
           echo "## Evaluation Metrics" >> $GITHUB_STEP_SUMMARY
-          cat artifacts/eval_metrics.json >> $GITHUB_STEP_SUMMARY
+          cat artifacts/eval_metrics.json >> $GITHUB_STEP_SUMMARY || true
 
       - name: Upload evaluation artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: eval-metrics
           path: artifacts/eval_metrics.json
+          if-no-files-found: warn
