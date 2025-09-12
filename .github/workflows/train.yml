@@ -1,7 +1,7 @@
 name: Train FX CNN-LSTM
 
 on:
-  workflow_dispatch: {}        # <-- makes the "Run workflow" button appear
+  workflow_dispatch: {}        # enables the "Run workflow" button
   schedule:
     - cron: "15 3 * * 1-5"     # optional: weekdays 03:15 UTC
 
@@ -12,9 +12,7 @@ jobs:
   train:
     runs-on: ubuntu-latest
     env:
-      # Sheets auth (must be set as a repo secret)
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      # Optional: cleaner TF logs + unbuffered output
       TF_CPP_MIN_LOG_LEVEL: "2"
       PYTHONUNBUFFERED: "1"
 
