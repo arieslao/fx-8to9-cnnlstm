@@ -33,3 +33,12 @@ jobs:
         with:
           name: daily-predictions
           path: artifacts/
+      - name: Commit predictions to repo
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          mkdir -p artifacts
+          # if your script writes pred_latest.json, this will commit it too
+          git add artifacts/*.json || true
+          git commit -m "Add daily predictions" || echo "No changes to commit"
+          git push
