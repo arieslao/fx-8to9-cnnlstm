@@ -1,94 +1,113 @@
 # src/data_dk.py
+from __future__ import annotations
+
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Dict, List, Tuple
+
 import pandas as pd
 import pytz
 
-# pip install dukascopy-python
-from dukascopy_python.client import DukascopyClient
+import dukascopy_python as dk  # <- correct package import
+import dukascopy_python.instruments as inst  # constants live here
+# Docs: https://pypi.org/project/dukascopy-python/ (usage shows top-level API and instruments) 
 
-_LDN = pytz.timezone("Europe/London")
+LONDON_TZ = pytz.timezone("Europe/London")
+UTC = pytz.UTC
 
-def _to_dk_symbol(yahoo_fx: str) -> str:
+# Map Yahoo-style tickers like "EURUSD=X" -> "EURUSD"
+def _normalize_pair(symbol: str) -> str:
+    s = symbol.strip().upper()
+    return s.replace("=X", "")
+
+def _instrument_from_pair(pair6: str):
     """
-    Convert Yahoo FX like 'EURUSD=X' -> 'EURUSD' for Dukascopy.
+    Convert 'EURUSD' -> instruments constant name like
+    INSTRUMENT_FX_MAJORS_EUR_USD
     """
-    return yahoo_fx.replace("=X", "").upper()
+    if len(pair6) != 6:
+        raise ValueError(f"Unexpected pair format: {pair6}")
 
-def fetch_fx_hourly_dk(ticker: str, start: str, end: str | None, tz_name: str = "Europe/London") -> pd.DataFrame:
+    base, quote = pair6[:3], pair6[3:]
+    name = f"INSTRUMENT_FX_MAJORS_{base}_{quote}"
+    if not hasattr(inst, name):
+        # Fallback for non-major combinations if needed (extend later)
+        raise KeyError(f"dukascopy_python.instruments missing {name}")
+    return getattr(inst, name)
+
+@dataclass
+class FetchConfig:
+    start: datetime
+    end: datetime
+    interval: str = "1h"       # we’ll map to dk.INTERVAL_HOUR_1
+    offer_side: str = "BID"    # BID or ASK
+
+def _dk_interval(interval: str):
+    interval = interval.lower()
+    if interval == "1h" or interval == "1hour" or interval == "hour":
+        return dk.INTERVAL_HOUR_1
+    # Extend if you ever need other granularities
+    raise ValueError(f"Unsupported interval: {interval}")
+
+def _dk_offer(offer_side: str):
+    offer_side = offer_side.upper()
+    if offer_side == "BID":
+        return dk.OFFER_SIDE_BID
+    if offer_side == "ASK":
+        return dk.OFFER_SIDE_ASK
+    raise ValueError(f"Unsupported offer_side: {offer_side}")
+
+def fetch_one_pair(pair: str, cfg: FetchConfig) -> pd.DataFrame:
     """
-    Fetch 1-hour candles [bid mid] from Dukascopy and align index to London time.
-    start/end are ISO-like strings in *local* time window; we convert to UTC ranges internally.
+    Fetch OHLCV for a single pair between cfg.start and cfg.end (UTC),
+    return a tz-aware London-indexed DataFrame with columns:
+    [open, high, low, close, volume] and a 'pair' column.
     """
-    sym = _to_dk_symbol(ticker)
+    pair6 = _normalize_pair(pair)
+    instrument = _instrument_from_pair(pair6)
+    interval = _dk_interval(cfg.interval)
+    offer = _dk_offer(cfg.offer_side)
 
-    # Parse start/end as timezone-aware London datetimes, then convert to UTC for the API
-    start_dt = pd.Timestamp(start, tz=_LDN)
-    end_dt = pd.Timestamp.now(tz=_LDN) if end is None else pd.Timestamp(end, tz=_LDN)
+    # dukascopy_python expects naive/aware datetimes; we pass UTC-aware
+    start_utc = cfg.start.astimezone(UTC)
+    end_utc = cfg.end.astimezone(UTC)
 
-    # Dukascopy client prefers UTC
-    start_utc = start_dt.tz_convert("UTC").to_pydatetime()
-    end_utc = end_dt.tz_convert("UTC").to_pydatetime()
+    # Historical fetch (returns a pandas DataFrame; see PyPI usage)
+    df = dk.fetch(instrument, interval, offer, start_utc, end_utc)
 
-    # Download hour bars (OHLC, volume). Dukascopy provides bid/ask; we’ll use mid.
-    # The client returns a DataFrame with columns like: ['open', 'high', 'low', 'close', 'volume', 'time']
-    cli = DukascopyClient()
-    df = cli.candles(
-        instrument=sym,
-        time_frame="H1",         # 1-hour
-        from_time=start_utc,
-        to_time=end_utc,
-        price_type="BID_ASK"     # get both; we'll compute mid
-    )
-    if df is None or df.empty:
-        return pd.DataFrame()
+    # Expect columns for non-tick interval: open, high, low, close, volume (per docs)
+    # Ensure index is tz-aware & convert to London time
+    if df.index.tz is None:
+        df.index = df.index.tz_localize(UTC)
+    df.index = df.index.tz_convert(LONDON_TZ)
 
-    # Ensure datetime index in London timezone
-    df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert(_LDN)
-    df = df.set_index("time").sort_index()
+    # Keep a clean schema
+    keep = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
+    df = df[keep].copy()
+    df["pair"] = pair6
+    return df
 
-    # If both bid/ask present, compute mid; otherwise keep what we have
-    # Some clients return columns like openBid/openAsk/... Adjust robustly.
-    def _mid(a, b): return (a + b) / 2.0
-
-    col_map = {
-        "open": ["openBid", "openAsk"],
-        "high": ["highBid", "highAsk"],
-        "low":  ["lowBid",  "lowAsk"],
-        "close":["closeBid","closeAsk"],
-        "volume":["volume"]  # volume may be present as a single column
-    }
-
-    def _get(name):
-        opts = col_map[name]
-        if len(opts) == 1 and opts[0] in df.columns:
-            return df[opts[0]]
-        if opts[0] in df.columns and opts[1] in df.columns:
-            return _mid(df[opts[0]], df[opts[1]])
-        # Fallback to any similarly named column
-        for c in df.columns:
-            if name in c.lower():
-                return df[c]
-        return pd.Series(index=df.index, dtype="float64")
-
-    out = pd.DataFrame({
-        "Open":  _get("open"),
-        "High":  _get("high"),
-        "Low":   _get("low"),
-        "Close": _get("close"),
-        "Volume": _get("volume").fillna(0.0),
-    }).dropna(how="all")
-
-    out["Ticker"] = ticker  # keep original Yahoo-style name
+def concat_pairs_dk(pairs: List[str], cfg: FetchConfig) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch and return a dict { 'EURUSD': df, ... } for given pairs.
+    """
+    out: Dict[str, pd.DataFrame] = {}
+    for p in pairs:
+        try:
+            d = fetch_one_pair(p, cfg)
+            out[_normalize_pair(p)] = d
+        except Exception as e:
+            # Let the caller decide how to handle missing instruments/data
+            raise RuntimeError(f"Failed to fetch {p}: {e}") from e
     return out
 
-def concat_pairs_dk(tickers, start, end, tz_name="Europe/London"):
-    frames = []
-    for t in tickers:
-        df = fetch_fx_hourly_dk(t, start, end, tz_name=tz_name)
-        if not df.empty:
-            frames.append(df)
-        else:
-            print(f"[INFO] Dukascopy returned no data for {t}")
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames).sort_index()
+def concat_pairs_frame(pairs: List[str], cfg: FetchConfig) -> pd.DataFrame:
+    """
+    Convenience: return one concatenated DataFrame with a 'pair' column.
+    """
+    parts = []
+    for p in pairs:
+        parts.append(fetch_one_pair(p, cfg))
+    if not parts:
+        raise RuntimeError("No data fetched for any pair")
+    return pd.concat(parts).sort_index()
