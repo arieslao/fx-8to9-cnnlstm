@@ -62,6 +62,8 @@ def main():
 
     # ---- Build features
     feat = add_indicators(raw)
+    feat.index.name = "ts"  # harmless; labels.py no longer depends on it
+
     print(f"[INFO] Feature rows (post-indicator dropna): {len(feat):,}")
 
     # ---- Create 8→9 London labels (keep only the 08:00 samples with next-hour target)
