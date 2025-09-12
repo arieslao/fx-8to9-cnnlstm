@@ -1,11 +1,12 @@
 import os, json
 import numpy as np
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, matthews_corrcoef
-from utils import load_config, get_env_list
-from data import concat_pairs
-from features import add_indicators, feature_cols
-from labels import make_8to9_label
-from windows import build_sequences
+from src.utils import load_config, get_env_list
+from src.data import concat_pairs
+from src.features import add_indicators, feature_cols
+from src.labels import make_8to9_label
+from src.windows import build_sequences
+
 import tensorflow as tf
 
 def main():
