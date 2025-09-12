@@ -1,5 +1,5 @@
 data:
-  provider: "dukascopy"       # dukascopy | yahoo
+  provider: "yahoo"       # dukascopy | yahoo
   interval: "1h"
   lookback_hours: 72          # context window before 08:00
   train_start: "2018-01-01"
