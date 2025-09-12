@@ -3,7 +3,8 @@ name: Train FX CNN-LSTM
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 3 * * 1-5"   # Weekdays at 03:15 UTC
+    # Weekdays at 03:15 UTC (adjust as desired)
+    - cron: "15 3 * * 1-5"
 
 permissions:
   contents: read
@@ -12,7 +13,7 @@ jobs:
   train:
     runs-on: ubuntu-latest
     env:
-      PYTHONUNBUFFERED: "1"         # unbuffered Python logs
+      PYTHONUNBUFFERED: "1"   # unbuffered Python logs for clear tracebacks
 
     steps:
       - name: Checkout
@@ -21,8 +22,10 @@ jobs:
       - name: Show workspace files (pre)
         run: |
           pwd
+          git rev-parse --abbrev-ref HEAD || true
           ls -la
-          echo "Default branch: $GITHUB_REF_NAME"
+          echo "---- config.yaml ----"
+          sed -n '1,200p' config.yaml || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,7 +37,8 @@ jobs:
           python -V
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip freeze | sed -n '1,120p'
+          echo "---- pip freeze (first 200 lines) ----"
+          pip freeze | sed -n '1,200p'
 
       - name: Export env (FX_TICKERS)
         env:
@@ -49,6 +53,7 @@ jobs:
 
       - name: Smoke check (optional)
         run: |
+          mkdir -p artifacts
           if [ -f src/smoke.py ]; then
             python -m src.smoke | tee artifacts/smoke_log.txt
           else
@@ -58,18 +63,25 @@ jobs:
       - name: Train model
         run: |
           mkdir -p artifacts
+          # capture the entire training log even if the UI truncates
           python -X faulthandler -m src.train 2>&1 | tee artifacts/train_log.txt
 
       - name: Verify outputs exist
         run: |
-          test -f models/cnn_lstm_fx.h5 || (echo 'Model missing: models/cnn_lstm_fx.h5' && exit 1)
+          if [ ! -f models/cnn_lstm_fx.h5 ]; then
+            echo 'Model missing: models/cnn_lstm_fx.h5'
+            echo 'Check artifacts/train_log.txt in the uploaded artifacts for the traceback.'
+            exit 1
+          fi
           ls -la models || true
           ls -la artifacts || true
 
       - name: Upload model & artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: model-and-artifacts
           path: |
             models/
             artifacts/
+          if-no-files-found: warn
