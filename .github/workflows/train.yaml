@@ -1,10 +1,9 @@
 name: Train FX CNN-LSTM
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}        # <-- makes the "Run workflow" button appear
   schedule:
-    # Weekdays at 03:15 UTC (adjust as desired)
-    - cron: "15 3 * * 1-5"
+    - cron: "15 3 * * 1-5"     # optional: weekdays 03:15 UTC
 
 permissions:
   contents: read
@@ -13,9 +12,9 @@ jobs:
   train:
     runs-on: ubuntu-latest
     env:
-      # --- IMPORTANT: Sheets auth for src/data_sheet.py ---
+      # Sheets auth (must be set as a repo secret)
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      # --- Optional: quieter TensorFlow logs; unbuffered Python output ---
+      # Optional: cleaner TF logs + unbuffered output
       TF_CPP_MIN_LOG_LEVEL: "2"
       PYTHONUNBUFFERED: "1"
 
@@ -23,21 +22,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Create artifacts folder early so we always upload logs
-      - name: Artifact scaffold
+      - name: Prepare artifacts folder
         run: |
           mkdir -p artifacts
           echo "train start $(date -u +%FT%TZ)" > artifacts/hello.txt
 
-      - name: Show workspace files (pre)
+      - name: Show workspace (quick sanity)
         run: |
           pwd
           git rev-parse --abbrev-ref HEAD || true
           ls -la
-          echo "---- config.yaml (first 120 lines) ----"
+          echo "---- first lines of config.yaml ----"
           sed -n '1,120p' config.yaml || true
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -47,41 +45,42 @@ jobs:
           python -V
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          echo "---- pip freeze (first 150 lines) ----"
-          pip freeze | sed -n '1,150p'
+          pip freeze | sed -n '1,120p'
 
-      # Export FX_TICKERS (optional, if your code reads it)
-      - name: Export env (FX_TICKERS)
+      - name: Export FX_TICKERS (optional)
         env:
           FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
         run: |
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
           echo "Using pairs: ${FX_TICKERS}"
 
-      # Simple smoke: can we read a few rows from the sheet?
-      - name: Smoke read (Google Sheets)
+      - name: Smoke read from Google Sheets
         run: |
           python - << 'PY'
-import os, json, sys
-print("Has GOOGLE_SERVICE_ACCOUNT_JSON:", bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")))
+import os, sys
 from src.utils import load_config
 from src.data_sheet import concat_pairs_sheet
 cfg = load_config()
 pairs = (os.getenv("FX_TICKERS") or "EURUSD=X").split(",")
-df = concat_pairs_sheet(pairs, cfg["data"]["train_start"], cfg["data"]["train_end"],
-                        cfg["data"]["timezone"],
-                        cfg["data"]["sheet"]["id"],
-                        cfg["data"]["sheet"]["worksheet"])
+df = concat_pairs_sheet(
+    pairs,
+    cfg["data"]["train_start"],
+    cfg["data"]["train_end"],
+    cfg["data"]["timezone"],
+    cfg["data"]["sheet"]["id"],
+    cfg["data"]["sheet"]["worksheet"],
+)
 print("Rows from sheet:", len(df))
 print(df.head(3))
-if df.empty: sys.exit("No rows read from sheet—check Sheet ID/tab name, sharing, and date range.")
+if df.empty:
+    sys.exit("No rows read from sheet — check Sheet ID/tab name, sharing, and date range.")
 PY
 
       - name: Train model
         run: |
           python -X faulthandler -m src.train 2>&1 | tee -a artifacts/train_log.txt
 
-      - name: Verify outputs exist
+      - name: Verify outputs
         run: |
           if [ ! -f models/cnn_lstm_fx.h5 ]; then
             echo 'Model missing: models/cnn_lstm_fx.h5' | tee -a artifacts/train_log.txt
