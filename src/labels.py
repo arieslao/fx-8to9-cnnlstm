@@ -1,4 +1,3 @@
-# src/labels.py
 from __future__ import annotations
 import pandas as pd
 
@@ -14,13 +13,12 @@ def make_8to9_label(
 ) -> pd.DataFrame:
     """
     Build labels for the 08:00→09:00 London window.
-
     Returns a DataFrame indexed by the 08:00 timestamp with columns:
-      ['Ticker', 'y', 'Close_08', 'Close_09', 'delta']
-    where y = 1 if (Close_09 - Close_08) > threshold else 0
+      ['Ticker', 'label', 'y', 'Close_08', 'Close_09', 'delta']
+    where label/y = 1 if (Close_09 - Close_08) > threshold else 0
     """
     if df.empty:
-        return pd.DataFrame(columns=["Ticker", "y", "Close_08", "Close_09", "delta"])
+        return pd.DataFrame(columns=["Ticker", "label", "y", "Close_08", "Close_09", "delta"])
 
     # sanity
     for c in (ticker_col, price_col):
@@ -40,37 +38,32 @@ def make_8to9_label(
         df8 = df8[df8.index.dayofweek < 5]
         df9 = df9[df9.index.dayofweek < 5]
 
-    # Add a day key for join and materialize the index as a stable column 'ts'
+    # Join on (Date, Ticker); keep the 08:00 timestamp as the index
     df8["Date"] = df8.index.normalize()
     df9["Date"] = df9.index.normalize()
-
     left = df8.rename(columns={price_col: "Close_08"})
     right = df9.rename(columns={price_col: "Close_09"})
 
-    # reset and rename the index column to 'ts' regardless of its original name
+    # reset indexes safely and rename the 08:00 index to 'ts'
     left_reset = left.reset_index()
-    idx8 = left.index.name or left_reset.columns[0]
-    left_reset = left_reset.rename(columns={idx8: "ts"})
+    idx8_name = left.index.name or left_reset.columns[0]  # whatever pandas chose
+    left_reset = left_reset.rename(columns={idx8_name: "ts"})
 
-    right_reset = right.reset_index()
-    # we don't need the 09:00 timestamp as index; just keep columns needed for the join
-    right_reset = right_reset[[ticker_col, "Date", "Close_09"]]
+    right_reset = right.reset_index()[[ticker_col, "Date", "Close_09"]]
 
     merged = (
         left_reset
-        .merge(
-            right_reset,
-            on=[ticker_col, "Date"],
-            how="inner",
-            validate="m:1",
-        )
-        .set_index("ts")  # 08:00 timestamp becomes the label index
+        .merge(right_reset, on=[ticker_col, "Date"], how="inner", validate="m:1")
+        .set_index("ts")
         .sort_index()
     )
 
     merged["delta"] = merged["Close_09"] - merged["Close_08"]
-    merged["y"] = (merged["delta"] > float(threshold)).astype("int8")
+    # primary column name expected by the rest of the pipeline
+    merged["label"] = (merged["delta"] > float(threshold)).astype("int8")
+    # keep 'y' as an alias for compatibility with any old call sites
+    merged["y"] = merged["label"].astype("int8")
 
-    out = merged[[ticker_col, "y", "Close_08", "Close_09", "delta"]].copy()
+    out = merged[[ticker_col, "label", "y", "Close_08", "Close_09", "delta"]].copy()
     out.index.name = None
     return out
