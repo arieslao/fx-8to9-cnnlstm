@@ -6,6 +6,9 @@ on:
     # Weekdays at 03:15 UTC (adjust as desired)
     - cron: "15 3 * * 1-5"
 
+permissions:
+  contents: read
+
 jobs:
   train:
     runs-on: ubuntu-latest
@@ -26,30 +29,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Set FX env
+      - name: Export env (FX_TICKERS)
         env:
           FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
         run: |
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
           echo "Using pairs: ${FX_TICKERS}"
 
-      # Optional but helpful sanity checks. They will fail fast with a clear error.
-      - name: Verify dukascopy install
+      # Optional sanity checks — fail fast with clear messages
+      - name: Verify dukascopy import
         run: |
-          python - << 'PY'
-import sys
-try:
-    import dukascopy_python as dk
-    import dukascopy_python.instruments as inst
-    print("dukascopy_python OK")
-except Exception as e:
-    print("dukascopy_python import failed:", repr(e)); sys.exit(1)
-PY
+          python -c "import dukascopy_python as dk; import dukascopy_python.instruments as inst; print('dukascopy_python OK')"
 
-      - name: Preflight fetch (smoke test if present)
+      - name: Preflight fetch (if smoke test present)
         run: |
           if [ -f src/smoke.py ]; then
-            python -m src.smoke || (echo "SMOKE FAILED" && exit 1)
+            python -m src.smoke
           else
             echo "No smoke.py present, skipping."
           fi
