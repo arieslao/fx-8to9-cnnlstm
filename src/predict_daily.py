@@ -72,3 +72,9 @@ if __name__ == "__main__":
     args = p.parse_args()
     main(force=args.force)
 
+latest_path = os.path.join(cfg["runtime"]["out_dir"], "pred_latest.json")
+with open(latest_path, "w") as f:
+    json.dump({"date": str(today), "predictions": preds}, f, indent=2)
+print(json.dumps({"saved_latest": latest_path}, indent=2))
+
+
