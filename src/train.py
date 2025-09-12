@@ -2,7 +2,12 @@ import os, json
 import numpy as np
 import pandas as pd
 from src.utils import load_config, ensure_dirs, get_env_list
-from src.data import concat_pairs
+# OLD:
+# from src.data import concat_pairs
+# NEW:
+from src.data import concat_pairs as concat_pairs_yf
+from src.data_dk import concat_pairs_dk
+
 from src.features import add_indicators, feature_cols
 from src.labels import make_8to9_label
 from src.windows import build_sequences
@@ -11,21 +16,27 @@ from src.model import build_cnn_lstm
 
 def main():
     cfg = load_config()
-    ensure_dirs(cfg["runtime"]["out_dir"], cfg["runtime"]["model_dir"])
-
-    tickers = get_env_list("FX_TICKERS", [])
-    if not tickers:
-        raise ValueError("Set FX_TICKERS in environment (e.g., EURUSD=X,GBPUSD=X)")
-
-    raw = concat_pairs(
-        tickers,
-        cfg["data"]["train_start"],
-        cfg["data"]["train_end"],
-        interval=cfg["data"]["interval"],
-        tz_name=cfg["data"]["timezone"]
-    )
+    provider = cfg["data"].get("provider", "dukascopy").lower()
+    
+    if provider == "dukascopy":
+        raw = concat_pairs_dk(
+            tickers,
+            cfg["data"]["train_start"],
+            cfg["data"]["train_end"],
+            tz_name=cfg["data"]["timezone"]
+        )
+    else:
+        raw = concat_pairs_yf(
+            tickers,
+            cfg["data"]["train_start"],
+            cfg["data"]["train_end"],
+            interval=cfg["data"]["interval"],
+            tz_name=cfg["data"]["timezone"]
+        )
+    
     if raw.empty:
-        raise RuntimeError("No data fetched.")
+        raise RuntimeError("No data fetched for ANY ticker. Check provider/date range.")
+
 
     feat = add_indicators(raw)
     label_df = make_8to9_label(
