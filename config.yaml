@@ -1,4 +1,14 @@
 data:
+  provider: "dukascopy"     # <— new: dukascopy | yahoo
+  interval: "1h"
+  lookback_hours: 72
+  train_start: "2018-01-01"
+  train_end: "2024-12-31"
+  test_start: "2025-01-01"
+  test_end: "2025-12-31"
+  timezone: "Europe/London"
+  trading_days_only: true
+
   interval: "1h"
   lookback_hours: 72         # context window before 08:00
   train_start: "2018-01-01"
