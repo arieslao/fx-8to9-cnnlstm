@@ -5,7 +5,7 @@ from src.utils import load_config, ensure_dirs, get_env_list
 # OLD:
 # from src.data import concat_pairs
 # NEW:
-from src.data import concat_pairs as concat_pairs_yf
+#from src.data import concat_pairs as concat_pairs_yf
 from src.data_dk import concat_pairs_dk
 
 from src.features import add_indicators, feature_cols
