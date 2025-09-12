@@ -1,36 +1,40 @@
+# src/labels.py
+from __future__ import annotations
 import pandas as pd
 
-def make_8to9_label(df: pd.DataFrame, start_hour=8, end_hour=9, threshold=0.0) -> pd.DataFrame:
+def make_8to9_label(
+    feat: pd.DataFrame,
+    start_hour: int = 8,
+    end_hour: int = 9,           # kept for signature symmetry; we use next-hour close
+    direction_threshold: float = 0.0,
+) -> pd.DataFrame:
     """
-    Label each day for each ticker: +1 if Close@09:00 > Close@08:00, else 0.
-    Keep only the row at 08:00 (the decision time), with the label attached.
+    Build labels for the 08:00→09:00 London window.
+    Returns a DataFrame indexed by timestamp ('ts') with columns: ['y','Ticker'].
+
+    y = 1 if Close@09:00 - Close@08:00 > direction_threshold else 0
     """
-    df = df.copy()
-    df["date"] = df.index.date
-    df["hour"] = df.index.hour
+    df = feat.copy()
 
-    # Get 08:00 and 09:00 rows per date/ticker
-    eight = df[df["hour"] == start_hour].copy()
-    nine  = df[df["hour"] == end_hour].copy()
+    # Ensure tz-aware London index
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, utc=True)
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("UTC")
+    df.index = df.index.tz_convert("Europe/London")
+    df = df.sort_index()
 
-    key_cols = ["Ticker","date"]
-    eight = eight.reset_index().rename(columns={"index":"ts"})
-    nine  = nine.reset_index().rename(columns={"index":"ts"})
+    # Next-hour close per pair
+    df["next_close"] = df.groupby("Ticker")["Close"].shift(-1)
 
-    merged = eight.merge(
-        nine[["Ticker","date","Close"]].rename(columns={"Close":"close_9"}),
-        on=key_cols, how="inner"
-    )
+    # Keep only 08:00 rows (the label is about the move into the next hour)
+    m8 = df.index.hour == int(start_hour)
+    lab = df.loc[m8, ["Close", "next_close", "Ticker"]].dropna().copy()
 
-    merged = merged.rename(columns={"Close":"close_8"})
-    merged["label_raw"] = merged["close_9"] - merged["close_8"]
-    merged["label"] = (merged["label_raw"] > threshold).astype(int)
+    # Direction label
+    lab["y"] = (lab["next_close"] - lab["Close"] > float(direction_threshold)).astype("int8")
 
-    # Use the 08:00 timestamp as the sample time
-    merged = merged.set_index("ts").sort_index()
-
-    # Keep a compact frame for modeling
-    keep_cols = [
-        "Ticker","date","close_8","close_9","label"
-    ]
-    return merged[keep_cols]
+    # Shape for downstream: index named 'ts', columns ['y','Ticker']
+    lab = lab.drop(columns=["Close", "next_close"])
+    lab.index.name = "ts"
+    return lab[["y", "Ticker"]]
