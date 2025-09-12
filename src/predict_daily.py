@@ -66,5 +66,9 @@ def main(force=False):
     print(json.dumps({"saved": out_path, "predictions": preds}, indent=2))
 
 if __name__ == "__main__":
-    # set force=True if you want to test outside the time window
-    main(force=False)
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--force", action="store_true", help="run regardless of current time")
+    args = p.parse_args()
+    main(force=args.force)
+
