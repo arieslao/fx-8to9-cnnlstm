@@ -2,9 +2,9 @@ import os, json
 import pandas as pd
 import numpy as np
 import tensorflow as tf
-from utils import load_config, now_london, get_env_list
-from data import concat_pairs
-from features import add_indicators, feature_cols
+from src.utils import load_config, now_london, get_env_list
+from src.data import concat_pairs
+from src.features import add_indicators, feature_cols
 from windows import build_sequences
 
 def should_run_now():
