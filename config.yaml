@@ -1,32 +1,23 @@
 data:
-  provider: "dukascopy"     # <— new: dukascopy | yahoo
+  provider: "dukascopy"       # dukascopy | yahoo
   interval: "1h"
-  lookback_hours: 72
+  lookback_hours: 72          # context window before 08:00
   train_start: "2018-01-01"
   train_end: "2024-12-31"
   test_start: "2025-01-01"
-  test_end: "2025-12-31"
-  timezone: "Europe/London"
-  trading_days_only: true
-
-  interval: "1h"
-  lookback_hours: 72         # context window before 08:00
-  train_start: "2018-01-01"
-  train_end: "2024-12-31"
-  test_start: "2025-01-01"
-  test_end: "2025-12-31"
-  timezone: "Europe/London"  # align everything to London time
-  trading_days_only: true
+  test_end: "2025-12-31"      # ok if in future; feed will cap to latest available
+  timezone: "Europe/London"   # align everything to London time
+  trading_days_only: true     # harmless for FX; not strictly used
 
 label:
   target_window:
-    start_hour: 8            # 08:00 London
-    end_hour: 9              # 09:00 London
+    start_hour: 8             # 08:00 London
+    end_hour: 9               # 09:00 London
   direction_threshold: 0.0    # >0 up, <=0 down
 
 model:
   seq_len: 72                 # matches lookback_hours
-  n_features: 20              # auto-computed; keep placeholder
+  n_features: 20              # placeholder; actual value inferred from features.py
   cnn_filters: 32
   cnn_kernel: 3
   lstm_units: 64
