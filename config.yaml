@@ -1,8 +1,8 @@
 data:
   provider: "sheet"                 # <- new provider (sheet | dukascopy | yahoo)
-  interval: "1h"                    # still used elsewhere (features etc.)
+  interval: "4h"                    # still used elsewhere (features etc.)
   lookback_hours: 72
-  train_start: "2018-01-01"
+  train_start: "2024-01-01"
   train_end: "2024-12-31"
   test_start: "2025-01-01"
   test_end: "2025-12-31"
@@ -15,12 +15,12 @@ data:
 
 label:
   target_window:
-    start_hour: 8             # 08:00 London
-    end_hour: 9               # 09:00 London
+    start_hour: 5             # 08:00 London
+    end_hour: 13               # 13:00 London
   direction_threshold: 0.0    # >0 up, <=0 down
 
 model:
-  seq_len: 72                 # matches lookback_hours
+  seq_len: 18                 # matches lookback_hours
   n_features: 20              # placeholder; actual value inferred from features.py
   cnn_filters: 32
   cnn_kernel: 3
