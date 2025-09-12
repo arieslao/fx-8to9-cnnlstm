@@ -4,7 +4,7 @@ from typing import List, Optional
 import pandas as pd
 import pytz
 
-# Import dukascopy lib defensively
+# Import defensively
 try:
     import dukascopy_python as dk
     import dukascopy_python.instruments as inst
@@ -18,89 +18,88 @@ _LDN = pytz.timezone("Europe/London")
 def _require_dk():
     if dk is None:
         raise ImportError(
-            "dukascopy-python is not importable. Ensure requirements.txt contains "
-            "dukascopy-python==4.0.1. Original error: %r" % (_DK_IMPORT_ERROR,)
+            "dukascopy-python not importable. Ensure requirements.txt has dukascopy-python==4.0.1. "
+            f"Original error: {_DK_IMPORT_ERROR!r}"
         )
 
 def _normalize_symbol(t: str) -> str:
-    # "EURUSD=X" -> "EURUSD"
-    return t.strip().upper().replace("=X", "")
+    return t.strip().upper().replace("=X", "")  # "EURUSD=X" -> "EURUSD"
 
 def _instrument_for(pair6: str):
-    """
-    Try to resolve 'EURUSD' -> dukascopy instrument constant, e.g.
-    dukascopy_python.instruments.INSTRUMENT_FX_MAJORS_EUR_USD
-    Falls back to raw 'EURUSD' if the constant doesn't exist.
-    """
     base, quote = pair6[:3], pair6[3:]
-    if inst is not None:
-        name = f"INSTRUMENT_FX_MAJORS_{base}_{quote}"
-        if hasattr(inst, name):
-            return getattr(inst, name)
-    # Fallback: many APIs accept plain 'EURUSD'
-    return pair6
+    name = f"INSTRUMENT_FX_MAJORS_{base}_{quote}"
+    if inst is not None and hasattr(inst, name):
+        return getattr(inst, name)
+    return pair6  # many APIs accept "EURUSD" directly
 
 def _call_dk_api(instrument, start_utc, end_utc) -> pd.DataFrame:
     """
-    Call whichever entry point exists in this dukascopy-python build,
-    returning a DataFrame with columns at least [open, high, low, close, volume].
+    Try several known API shapes in dukascopy-python across versions:
+      1) fetch(instrument, interval, offer_side, start, end)               (positional)
+      2) fetch(instrument, interval, start, end)                           (positional, no offer)
+      3) fetch(instrument=..., interval=..., date_from=..., date_to=..., offer_side=...) (kwargs)
+      4) get_price_history(..., timeframe='1H')
+      5) get_data(..., timeframe='1H')
     """
-    # 1) Preferred: dk.fetch(...)
     if hasattr(dk, "fetch"):
-        # Try common constant names; if missing, pass None where allowed
         interval = getattr(dk, "INTERVAL_HOUR_1", None)
-        offer   = getattr(dk, "OFFER_SIDE_BID", None)
-        args = {}
-        if interval is not None: args["interval"] = interval
-        if offer   is not None: args["offer_side"] = offer
-        return dk.fetch(instrument=instrument, date_from=start_utc, date_to=end_utc, **args)
+        offer    = getattr(dk, "OFFER_SIDE_BID", None)
 
-    # 2) Alternate: dk.get_price_history(...)
+        # (1) full positional
+        try:
+            return dk.fetch(instrument, interval, offer, start_utc, end_utc)
+        except TypeError:
+            pass
+
+        # (2) positional without offer_side
+        try:
+            return dk.fetch(instrument, interval, start_utc, end_utc)
+        except TypeError:
+            pass
+
+        # (3) kwargs style (older/newer alt)
+        try:
+            kwargs = {}
+            if interval is not None: kwargs["interval"] = interval
+            if offer is not None:    kwargs["offer_side"] = offer
+            return dk.fetch(instrument=instrument, date_from=start_utc, date_to=end_utc, **kwargs)
+        except TypeError:
+            pass
+
+    # (4) alternate API name
     if hasattr(dk, "get_price_history"):
-        return dk.get_price_history(
-            instrument=instrument,
-            start=start_utc, end=end_utc,
-            timeframe="1H"
-        )
+        return dk.get_price_history(instrument=instrument, start=start_utc, end=end_utc, timeframe="1H")
 
-    # 3) Alternate: dk.get_data(...)
+    # (5) alternate API name
     if hasattr(dk, "get_data"):
-        return dk.get_data(
-            instrument=instrument,
-            date_from=start_utc, date_to=end_utc,
-            timeframe="1H"
-        )
+        return dk.get_data(instrument=instrument, date_from=start_utc, date_to=end_utc, timeframe="1H")
 
     raise AttributeError(
-        "Unsupported dukascopy-python API on runner. Neither fetch(), "
-        "get_price_history(), nor get_data() is available."
+        "dukascopy-python on this runner exposes neither a compatible fetch() nor get_price_history()/get_data()."
     )
 
 def _normalize_df(df: pd.DataFrame, ticker: str, tz_name: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["Open","High","Low","Close","Volume","Ticker"])
 
-    # Ensure datetime index -> London tz
+    # index → London tz
     if not isinstance(df.index, pd.DatetimeIndex):
-        # Some variants return a 'time' column
-        time_col = "time" if "time" in df.columns else None
-        if time_col:
-            df = df.set_index(pd.to_datetime(df[time_col], utc=True))
+        tcol = "time" if "time" in df.columns else None
+        if tcol:
+            df = df.set_index(pd.to_datetime(df[tcol], utc=True))
         else:
             df.index = pd.to_datetime(df.index, utc=True)
     if df.index.tz is None:
         df.index = df.index.tz_localize("UTC")
-    df.index = df.index.tz_convert(tz_name or _LDN)
+    df.index = df.index.tz_convert(tz_name)
 
-    # Normalize column names to title case used by pipeline
+    # columns → Title case used by pipeline
     rename = {}
     for c in list(df.columns):
         lc = c.lower()
         if lc in ("open","high","low","close","volume"):
             rename[c] = lc.title()
     df = df.rename(columns=rename)
-
-    # Ensure required columns exist
     for c in ["Open","High","Low","Close","Volume"]:
         if c not in df.columns:
             df[c] = pd.NA
@@ -113,13 +112,13 @@ def fetch_pair_dk(ticker: str, start: str, end: Optional[str], tz_name: str) -> 
     pair6 = _normalize_symbol(ticker)
     instrument = _instrument_for(pair6)
 
-    # Convert London-local strings to UTC datetimes for the API
-    start_utc = pd.Timestamp(start, tz=tz_name or _LDN).tz_convert("UTC").to_pydatetime()
-    end_ts = pd.Timestamp(end, tz=tz_name or _LDN) if end else pd.Timestamp.now(tz=tz_name or _LDN)
+    # convert London-local strings → UTC datetimes for API
+    start_utc = pd.Timestamp(start, tz=tz_name).tz_convert("UTC").to_pydatetime()
+    end_ts = pd.Timestamp(end, tz=tz_name) if end else pd.Timestamp.now(tz=tz_name)
     end_utc = end_ts.tz_convert("UTC").to_pydatetime()
 
     raw = _call_dk_api(instrument, start_utc, end_utc)
-    return _normalize_df(raw, ticker, tz_name or "Europe/London")
+    return _normalize_df(raw, ticker, tz_name)
 
 def concat_pairs_dk(tickers: List[str], start: str, end: Optional[str], tz_name: str = "Europe/London") -> pd.DataFrame:
     frames = []
