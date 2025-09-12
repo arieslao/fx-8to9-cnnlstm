@@ -3,38 +3,39 @@ name: Train FX CNN-LSTM
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 3 * * 1-5"   # weekdays 03:15 UTC
+    # Weekdays at 03:15 UTC (adjust as desired)
+    - cron: "15 3 * * 1-5"
 
 permissions:
   contents: read
 
 jobs:
-  env:
-    PYTHONUNBUFFERED: "1"
-    TF_CPP_MIN_LOG_LEVEL: "2"
-    GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-
   train:
     runs-on: ubuntu-latest
     env:
+      # --- IMPORTANT: Sheets auth for src/data_sheet.py ---
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      # --- Optional: quieter TensorFlow logs; unbuffered Python output ---
+      TF_CPP_MIN_LOG_LEVEL: "2"
       PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Artifact scaffold (ensure uploads exist even if later steps skip)
+      # Create artifacts folder early so we always upload logs
+      - name: Artifact scaffold
         run: |
           mkdir -p artifacts
-          echo "scaffold $(date -u +%FT%TZ)" > artifacts/hello.txt
+          echo "train start $(date -u +%FT%TZ)" > artifacts/hello.txt
 
       - name: Show workspace files (pre)
         run: |
           pwd
           git rev-parse --abbrev-ref HEAD || true
           ls -la
-          echo "---- config.yaml ----"
-          sed -n '1,200p' config.yaml || true
+          echo "---- config.yaml (first 120 lines) ----"
+          sed -n '1,120p' config.yaml || true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -46,9 +47,10 @@ jobs:
           python -V
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          echo "---- pip freeze (first 200 lines) ----"
-          pip freeze | sed -n '1,200p'
+          echo "---- pip freeze (first 150 lines) ----"
+          pip freeze | sed -n '1,150p'
 
+      # Export FX_TICKERS (optional, if your code reads it)
       - name: Export env (FX_TICKERS)
         env:
           FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
@@ -56,13 +58,27 @@ jobs:
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
           echo "Using pairs: ${FX_TICKERS}"
 
-      - name: Verify dukascopy import
+      # Simple smoke: can we read a few rows from the sheet?
+      - name: Smoke read (Google Sheets)
         run: |
-          python -c "import dukascopy_python as dk; import dukascopy_python.instruments as inst; print('dukascopy_python OK')"
+          python - << 'PY'
+import os, json, sys
+print("Has GOOGLE_SERVICE_ACCOUNT_JSON:", bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")))
+from src.utils import load_config
+from src.data_sheet import concat_pairs_sheet
+cfg = load_config()
+pairs = (os.getenv("FX_TICKERS") or "EURUSD=X").split(",")
+df = concat_pairs_sheet(pairs, cfg["data"]["train_start"], cfg["data"]["train_end"],
+                        cfg["data"]["timezone"],
+                        cfg["data"]["sheet"]["id"],
+                        cfg["data"]["sheet"]["worksheet"])
+print("Rows from sheet:", len(df))
+print(df.head(3))
+if df.empty: sys.exit("No rows read from sheet—check Sheet ID/tab name, sharing, and date range.")
+PY
 
       - name: Train model
         run: |
-          # save the entire training log even if UI truncates
           python -X faulthandler -m src.train 2>&1 | tee -a artifacts/train_log.txt
 
       - name: Verify outputs exist
@@ -73,16 +89,6 @@ jobs:
           fi
           ls -la models | tee -a artifacts/train_log.txt
           ls -la artifacts || true
-
-      - name: Job summary
-        if: always()
-        run: |
-          echo "## Train run summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** $GITHUB_REF_NAME" >> $GITHUB_STEP_SUMMARY
-          echo "**FX_TICKERS:** ${FX_TICKERS}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Artifacts include \`train_log.txt\` and (on success) the model under \`models/\`." >> $GITHUB_STEP_SUMMARY
 
       - name: Upload model & artifacts
         if: always()
