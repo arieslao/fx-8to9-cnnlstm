@@ -9,6 +9,11 @@ permissions:
   contents: read
 
 jobs:
+  env:
+    PYTHONUNBUFFERED: "1"
+    TF_CPP_MIN_LOG_LEVEL: "2"
+    GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+
   train:
     runs-on: ubuntu-latest
     env:
