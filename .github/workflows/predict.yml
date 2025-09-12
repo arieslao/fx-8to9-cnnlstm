@@ -1,0 +1,35 @@
+name: Predict 8→9 London
+
+on:
+  workflow_dispatch:
+  schedule:
+    # BST months (Mar–Oct): run 06:55 UTC ≈ 07:55 London
+    - cron: "55 6 1-31 3-10 1-5"
+    # GMT months (Nov–Feb): run 07:55 UTC ≈ 07:55 London
+    - cron: "55 7 1-31 11,12,1,2 1-5"
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Set env
+        env:
+          FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
+        run: |
+          echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
+      - name: Predict
+        run: |
+          python -m src.predict_daily
+      - name: Upload predictions
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-predictions
+          path: artifacts/
