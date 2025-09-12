@@ -3,8 +3,7 @@ name: Train FX CNN-LSTM
 on:
   workflow_dispatch:
   schedule:
-    # Weekdays at 03:15 UTC (adjust as desired)
-    - cron: "15 3 * * 1-5"
+    - cron: "15 3 * * 1-5"   # Weekdays at 03:15 UTC
 
 permissions:
   contents: read
@@ -13,11 +12,17 @@ jobs:
   train:
     runs-on: ubuntu-latest
     env:
-      PYTHONUNBUFFERED: "1"   # show logs/tracebacks immediately
+      PYTHONUNBUFFERED: "1"         # unbuffered Python logs
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Show workspace files (pre)
+        run: |
+          pwd
+          ls -la
+          echo "Default branch: $GITHUB_REF_NAME"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,8 +31,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -V
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip freeze | sed -n '1,120p'
 
       - name: Export env (FX_TICKERS)
         env:
@@ -36,22 +43,28 @@ jobs:
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
           echo "Using pairs: ${FX_TICKERS}"
 
-      # Optional sanity checks — fail fast with clear messages
       - name: Verify dukascopy import
         run: |
           python -c "import dukascopy_python as dk; import dukascopy_python.instruments as inst; print('dukascopy_python OK')"
 
-      - name: Preflight fetch (if smoke test present)
+      - name: Smoke check (optional)
         run: |
           if [ -f src/smoke.py ]; then
-            python -m src.smoke
+            python -m src.smoke | tee artifacts/smoke_log.txt
           else
             echo "No smoke.py present, skipping."
           fi
 
       - name: Train model
         run: |
-          python -m src.train
+          mkdir -p artifacts
+          python -X faulthandler -m src.train 2>&1 | tee artifacts/train_log.txt
+
+      - name: Verify outputs exist
+        run: |
+          test -f models/cnn_lstm_fx.h5 || (echo 'Model missing: models/cnn_lstm_fx.h5' && exit 1)
+          ls -la models || true
+          ls -la artifacts || true
 
       - name: Upload model & artifacts
         uses: actions/upload-artifact@v4
