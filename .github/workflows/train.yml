@@ -33,6 +33,14 @@ jobs:
           echo "---- first lines of config.yaml ----"
           sed -n '1,120p' config.yaml || true
 
+      - name: Guard – Sheets secret present
+        run: |
+          if [ -z "${GOOGLE_SERVICE_ACCOUNT_JSON}" ]; then
+            echo "ERROR: GOOGLE_SERVICE_ACCOUNT_JSON secret is missing."
+            exit 1
+          fi
+          echo "Sheets secret detected."
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -96,3 +104,10 @@ PY
             models/
             artifacts/
           if-no-files-found: warn
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## Train run summary" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** $GITHUB_REF_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "**FX_TICKERS:** ${FX_TICKERS}" >> $GITHUB_STEP_SUMMARY
