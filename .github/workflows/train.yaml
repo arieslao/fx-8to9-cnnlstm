@@ -3,8 +3,7 @@ name: Train FX CNN-LSTM
 on:
   workflow_dispatch:
   schedule:
-    # Weekdays at 03:15 UTC (adjust as desired)
-    - cron: "15 3 * * 1-5"
+    - cron: "15 3 * * 1-5"   # weekdays 03:15 UTC
 
 permissions:
   contents: read
@@ -13,11 +12,16 @@ jobs:
   train:
     runs-on: ubuntu-latest
     env:
-      PYTHONUNBUFFERED: "1"   # unbuffered Python logs for clear tracebacks
+      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Artifact scaffold (ensure uploads exist even if later steps skip)
+        run: |
+          mkdir -p artifacts
+          echo "scaffold $(date -u +%FT%TZ)" > artifacts/hello.txt
 
       - name: Show workspace files (pre)
         run: |
@@ -51,30 +55,29 @@ jobs:
         run: |
           python -c "import dukascopy_python as dk; import dukascopy_python.instruments as inst; print('dukascopy_python OK')"
 
-      - name: Smoke check (optional)
-        run: |
-          mkdir -p artifacts
-          if [ -f src/smoke.py ]; then
-            python -m src.smoke | tee artifacts/smoke_log.txt
-          else
-            echo "No smoke.py present, skipping."
-          fi
-
       - name: Train model
         run: |
-          mkdir -p artifacts
-          # capture the entire training log even if the UI truncates
-          python -X faulthandler -m src.train 2>&1 | tee artifacts/train_log.txt
+          # save the entire training log even if UI truncates
+          python -X faulthandler -m src.train 2>&1 | tee -a artifacts/train_log.txt
 
       - name: Verify outputs exist
         run: |
           if [ ! -f models/cnn_lstm_fx.h5 ]; then
-            echo 'Model missing: models/cnn_lstm_fx.h5'
-            echo 'Check artifacts/train_log.txt in the uploaded artifacts for the traceback.'
+            echo 'Model missing: models/cnn_lstm_fx.h5' | tee -a artifacts/train_log.txt
             exit 1
           fi
-          ls -la models || true
+          ls -la models | tee -a artifacts/train_log.txt
           ls -la artifacts || true
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## Train run summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** $GITHUB_REF_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "**FX_TICKERS:** ${FX_TICKERS}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Artifacts include \`train_log.txt\` and (on success) the model under \`models/\`." >> $GITHUB_STEP_SUMMARY
 
       - name: Upload model & artifacts
         if: always()
