@@ -1,7 +1,7 @@
 name: Train FX CNN-LSTM
 
 on:
-  workflow_dispatch: {}        # enables the "Run workflow" button
+  workflow_dispatch:     
   schedule:
     - cron: "15 3 * * 1-5"     # optional: weekdays 03:15 UTC
 
