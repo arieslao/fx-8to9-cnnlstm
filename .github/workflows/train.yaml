@@ -13,7 +13,8 @@ from src.windows import build_sequences
 from src.model import build_cnn_lstm
 
 # Data providers
-from src.data import concat_pairs as concat_pairs_yf          # Yahoo fallback
+#from src.data import concat_pairs as concat_pairs_yf          # Yahoo fallback
+
 from src.data_dk import concat_pairs_dk                       # Dukascopy primary
 
 
