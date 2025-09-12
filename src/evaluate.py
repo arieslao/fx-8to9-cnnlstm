@@ -10,16 +10,25 @@ from src.labels import make_8to9_label
 from src.windows import build_sequences
 
 # Providers
+from src.data_sheet import concat_pairs_sheet
 from src.data import concat_pairs as concat_pairs_yf
 from src.data_dk import concat_pairs_dk
 
 
-def _fetch(provider: str, tickers, start, end, interval, tz_name):
-    provider = (provider or "dukascopy").lower()
-    if provider == "dukascopy":
+def _fetch(provider: str, tickers, start, end, interval, tz_name, cfg):
+    provider = (provider or "sheet").lower()
+    print(f"[INFO] Data provider: {provider}")
+    if provider == "sheet":
+        sheet_id = cfg["data"]["sheet"]["id"]
+        worksheet = cfg["data"]["sheet"]["worksheet"]
+        return concat_pairs_sheet(tickers, start, end, tz_name, sheet_id, worksheet)
+    elif provider == "dukascopy":
+        from src.data_dk import concat_pairs_dk
         return concat_pairs_dk(tickers, start, end, tz_name=tz_name)
-    # default: yahoo
-    return concat_pairs_yf(tickers, start, end, interval=interval, tz_name=tz_name)
+    else:  # yahoo fallback
+        from src.data import concat_pairs as concat_pairs_yf
+        return concat_pairs_yf(tickers, start, end, interval=interval, tz_name=tz_name)
+
 
 
 def _binary_metrics(y_true: np.ndarray, y_hat: np.ndarray):
@@ -61,13 +70,15 @@ def main():
         raise ValueError("FX_TICKERS env required (e.g., EURUSD=X,GBPUSD=X,USDJPY=X)")
 
     raw = _fetch(
-        provider=cfg["data"].get("provider", "dukascopy"),
+        provider=cfg["data"].get("provider", "sheet"),
         tickers=tickers,
-        start=cfg["data"]["test_start"],
-        end=cfg["data"]["test_end"],
+        start=cfg["data"]["train_start"],
+        end=cfg["data"]["train_end"],
         interval=cfg["data"]["interval"],
         tz_name=cfg["data"]["timezone"],
+        cfg=cfg,
     )
+
     if raw.empty:
         raise RuntimeError("No data fetched for ANY ticker in test range. Check provider/date range.")
 
