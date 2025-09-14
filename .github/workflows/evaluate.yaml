@@ -1,12 +1,13 @@
 name: Evaluate FX CNN-LSTM
 
 on:
-  workflow_dispatch: {}          # manual Run workflow button
-  # schedule:                    # optional: add a cron if you want
-  #   - cron: "30 4 * * 1-5"     # weekdays 04:30 UTC
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "30 4 * * 1-5"
 
 permissions:
   contents: read
+  actions: read   # <-- needed for gh to list/download Train artifacts
 
 jobs:
   evaluate:
@@ -37,26 +38,39 @@ jobs:
           pip install -r requirements.txt
           pip freeze | sed -n '1,120p'
 
-      # (Optional) Use repo variable or secret for pairs; must match your Sheet tickers
-      - name: Export FX_TICKERS
+      - name: Export FX_TICKERS (optional)
         env:
           FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
         run: |
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
           echo "Using pairs: ${FX_TICKERS:-EURUSD=X,GBPUSD=X}"
 
-      # ↓↓↓ This is the key step: fetch the model produced by the latest Train run ↓↓↓
-      - name: Download latest model artifact from Train
+      # --------- Download the latest successful Train artifact ----------
+      - name: Download model from latest successful Train run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Download the most recent artifact named exactly "model-and-artifacts"
-          gh run download -R "$GITHUB_REPOSITORY" --name "model-and-artifacts" --dir .
-          echo "Contents of models/:"
+          # Find the latest successful run of the Train workflow
+          RUN_ID=$(gh run list \
+            --workflow "Train FX CNN-LSTM" \
+            --branch main \
+            --json databaseId,conclusion,status \
+            -q '[.[] | select(.conclusion=="success" and .status=="completed")][0].databaseId')
+
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful Train run found. Please run Train first."
+            exit 1
+          fi
+
+          echo "Downloading artifacts from Train run id: $RUN_ID"
+          gh run download "$RUN_ID" --name "model-and-artifacts" --dir .
+
+          echo "Models dir:"
           ls -la models || true
-          echo "Contents of artifacts/:"
+          echo "Artifacts dir:"
           ls -la artifacts || true
 
+      # --------- Accept .keras or .h5 ----------
       - name: Verify model present
         run: |
           if [ -f models/cnn_lstm_fx.keras ]; then
@@ -64,8 +78,7 @@ jobs:
           elif [ -f models/cnn_lstm_fx.h5 ]; then
             echo "Found legacy models/cnn_lstm_fx.h5"
           else
-            echo "ERROR: No model found (expected models/cnn_lstm_fx.keras or .h5)."
-            echo "Run the Train workflow first, then re-run Evaluate."
+            echo "ERROR: No model found after artifact download."
             exit 1
           fi
 
@@ -78,5 +91,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eval-artifacts
-          path: |
-            artifacts/
+          path: artifacts/
