@@ -207,10 +207,10 @@ def main():
 
     # ----------------- Save model (keras + optional h5) ---------------------
     model.save("models/cnn_lstm_fx.keras")
-    try:
-        model.save("models/cnn_lstm_fx.h5")
-    except Exception as e:
-        print("[WARN] Could not save .h5 fallback:", repr(e))
+    #try:
+    #    model.save("models/cnn_lstm_fx.h5")
+    #except Exception as e:
+    #    print("[WARN] Could not save .h5 fallback:", repr(e))
 
     # ----------------- Persist training artifacts ---------------------------
     with open("artifacts/train_history.json", "w") as f:
