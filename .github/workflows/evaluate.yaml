@@ -31,6 +31,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Download latest model artifact from Train
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh run download -R "$GITHUB_REPOSITORY" --name "model-and-artifacts" --dir .
+          ls -la models || true
+          ls -la artifacts || true
+
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
