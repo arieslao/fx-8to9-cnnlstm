@@ -1,143 +1,232 @@
 # src/train.py
 from __future__ import annotations
-
 import os
 import json
+from pathlib import Path
+from typing import Tuple, Dict
+
 import numpy as np
+import pandas as pd
 import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
 
-from src.utils import load_config, ensure_dirs, get_env_list
-from src.features import add_indicators, feature_cols
-from src.labels import make_8to9_label
-from src.windows import build_sequences
-from src.model import build_cnn_lstm
+from src.utils import load_config
+from src.data_sheet import concat_pairs_sheet
+from src.features import to_interval
+from src.labels import make_window_label
 
-# Data providers
-from src.data_sheet import concat_pairs_sheet                 # Google sheets history data
-from src.data import concat_pairs as concat_pairs_yf          # Yahoo fallback
-from src.data_dk import concat_pairs_dk                       # Dukascopy primary
+# -----------------------
+# Repro & small helpers
+# -----------------------
+def set_repro(seed: int = 42):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    tf.random.set_seed(seed)
+    np.random.seed(seed)
 
+def ensure_dirs():
+    Path("models").mkdir(parents=True, exist_ok=True)
+    Path("artifacts").mkdir(parents=True, exist_ok=True)
 
-def _fetch(provider: str, tickers, start, end, interval, tz_name, cfg):
-    provider = (provider or "sheet").lower()
-    print(f"[INFO] Data provider: {provider}")
-    if provider == "sheet":
-        sheet_id = cfg["data"]["sheet"]["id"]
-        worksheet = cfg["data"]["sheet"]["worksheet"]
-        return concat_pairs_sheet(tickers, start, end, tz_name, sheet_id, worksheet)
-    elif provider == "dukascopy":
-        from src.data_dk import concat_pairs_dk
-        return concat_pairs_dk(tickers, start, end, tz_name=tz_name)
-    else:  # yahoo fallback
-        from src.data import concat_pairs as concat_pairs_yf
-        return concat_pairs_yf(tickers, start, end, interval=interval, tz_name=tz_name)
+# -----------------------
+# Feature engineering
+# -----------------------
+def build_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Minimal, robust features on OHLCV:
+      - pct change on Close
+      - rolling z-scores for Close over 5 and 10 bars
+      - high-low range and body size
+      - rolling volatility (std of returns)
+    Works on both 1h and 4h inputs.
+    """
+    if df.empty:
+        return df
 
+    feat = df.copy()
+    feat["ret_close_1"] = feat.groupby("Ticker")["Close"].pct_change()
 
+    # z-scores
+    for w in (5, 10):
+        roll_mean = feat.groupby("Ticker")["Close"].transform(lambda s: s.rolling(w, min_periods=3).mean())
+        roll_std  = feat.groupby("Ticker")["Close"].transform(lambda s: s.rolling(w, min_periods=3).std())
+        feat[f"z_close_{w}"] = (feat["Close"] - roll_mean) / (roll_std.replace(0, np.nan))
+
+    # ranges/body
+    feat["hl_range"] = (feat["High"] - feat["Low"]) / feat["Close"].replace(0, np.nan)
+    feat["body"]     = (feat["Close"] - feat["Open"]) / feat["Close"].replace(0, np.nan)
+
+    # rolling volatility of returns
+    feat["vol_10"] = feat.groupby("Ticker")["ret_close_1"].transform(lambda s: s.rolling(10, min_periods=5).std())
+
+    # Replace inf/NaN with 0 after feature creation (safe default)
+    feat = feat.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return feat
+
+# -----------------------
+# Dataset builder
+# -----------------------
+def build_sequences(
+    features: pd.DataFrame,
+    labels: pd.DataFrame,
+    seq_len: int,
+    feature_cols: list[str],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Build (X, y) where each label row at timestamp t uses the *previous* seq_len bars
+    strictly before t (no leakage). Operates per ticker.
+    """
+    X, y = [], []
+    # Align by ticker, then for each label timestamp extract rolling window
+    features = features.sort_index()
+    labels   = labels.sort_index()
+    for tkr, lab_tkr in labels.groupby("Ticker"):
+        feat_tkr = features[features["Ticker"] == tkr]
+        if feat_tkr.empty:
+            continue
+        idx = feat_tkr.index
+
+        for ts, row in lab_tkr.iterrows():
+            # end of window is strictly before the label's start timestamp
+            end_loc = idx.searchsorted(ts)  # insertion point
+            start_loc = end_loc - seq_len
+            if start_loc < 0:
+                continue
+            window = feat_tkr.iloc[start_loc:end_loc]
+            if len(window) != seq_len:
+                continue
+            X.append(window[feature_cols].to_numpy(dtype=np.float32))
+            y.append(int(row["label"]))
+
+    if not X:
+        return np.empty((0, seq_len, len(feature_cols)), dtype=np.float32), np.empty((0,), dtype=np.int32)
+
+    X = np.stack(X)
+    y = np.array(y, dtype=np.int32)
+    return X, y
+
+# -----------------------
+# Model
+# -----------------------
+def build_cnn_lstm(input_steps: int, input_feats: int, cfg: Dict) -> keras.Model:
+    inp = keras.Input(shape=(input_steps, input_feats))
+    x = layers.Conv1D(filters=cfg["model"]["cnn_filters"], kernel_size=cfg["model"]["cnn_kernel"], padding="causal", activation="relu")(inp)
+    x = layers.Dropout(cfg["model"]["dropout"])(x)
+    x = layers.LSTM(cfg["model"]["lstm_units"], return_sequences=False)(x)
+    x = layers.Dropout(cfg["model"]["dropout"])(x)
+    x = layers.Dense(64, activation="relu")(x)
+    out = layers.Dense(1, activation="sigmoid")(x)
+    model = keras.Model(inp, out)
+    model.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=cfg["model"]["lr"]),
+        loss="binary_crossentropy",
+        metrics=[keras.metrics.BinaryAccuracy(name="acc")]
+    )
+    return model
+
+# -----------------------
+# Main train entry
+# -----------------------
 def main():
-    # ---- Load config & prepare dirs
+    set_repro(42)
+    ensure_dirs()
     cfg = load_config()
-    ensure_dirs(cfg["runtime"]["out_dir"], cfg["runtime"]["model_dir"])
 
-    # ---- Read tickers from env (Repo → Settings → Actions → Variables → FX_TICKERS)
-    tickers = get_env_list("FX_TICKERS", [])
-    if not tickers:
-        raise ValueError(
-            "FX_TICKERS env required (e.g., EURUSD=X,GBPUSD=X,USDJPY=X). "
-            "Set it in repo Settings → Secrets and variables → Actions → Variables."
-        )
-    print(f"[INFO] Training on {len(tickers)} pair(s): {tickers}")
+    # ----------------- Load raw 1H data from Google Sheets -----------------
+    pairs = (os.getenv("FX_TICKERS") or "EURUSD=X,GBPUSD=X").split(",")
+    pairs = [p.strip() for p in pairs if p.strip()]
 
-    # ---- Fetch training data
-    raw = _fetch(
-        provider=cfg["data"].get("provider", "sheet"),
-        tickers=tickers,
+    df_all = concat_pairs_sheet(
+        tickers=pairs,
         start=cfg["data"]["train_start"],
         end=cfg["data"]["train_end"],
-        interval=cfg["data"]["interval"],
         tz_name=cfg["data"]["timezone"],
-        cfg=cfg,
+        sheet_id=cfg["data"]["sheet"]["id"],
+        worksheet=cfg["data"]["sheet"]["worksheet"],
     )
+    if df_all.empty:
+        raise SystemExit("No rows loaded from sheet for the training window.")
 
-    if raw.empty:
-        raise RuntimeError("No data fetched for ANY ticker in train range. Check provider/date range.")
+    # ----------------- Resample to interval (4h) if requested --------------
+    df_all = to_interval(df_all, cfg["data"]["interval"], cfg["data"]["timezone"])
 
-    print(f"[INFO] Fetched rows: {len(raw):,}. Timezone on index: {raw.index.tz}")
-    print(f"[INFO] Raw columns: {list(raw.columns)}")
+    # ----------------- Feature engineering ---------------------------------
+    feat_df = build_features(df_all)
 
-    # ---- Build features
-    feat = add_indicators(raw)
-    feat.index.name = "ts"  # harmless; labels.py no longer depends on it
+    # Choose feature columns (exclude label-like columns)
+    base_cols = ["Open","High","Low","Close","Volume"]
+    extra_cols = [c for c in feat_df.columns if c not in base_cols + ["Ticker"]]
+    feature_cols = base_cols + extra_cols
 
-    print(f"[INFO] Feature rows (post-indicator dropna): {len(feat):,}")
-
-    # ---- Create 8→9 London labels (keep only the 08:00 samples with next-hour target)
-    labels = make_8to9_label(
-        feat,
-        cfg["label"]["target_window"]["start_hour"],
-        cfg["label"]["target_window"]["end_hour"],
-        cfg["label"]["direction_threshold"],
+    # ----------------- Labels for (start_hour -> end_hour) ------------------
+    labels = make_window_label(
+        feat_df,
+        cfg["label"]["target_window"]["start_hour"],   # e.g., 5
+        cfg["label"]["target_window"]["end_hour"],     # e.g., 13
+        cfg["label"]["direction_threshold"],           # e.g., 0.0
+        ticker_col="Ticker",
+        price_col="Close",
+        trading_days_only=cfg["data"]["trading_days_only"],
     )
-    print(f"[INFO] Label samples (08:00 rows with 09:00 targets): {len(labels):,}")
+    if labels.empty:
+        raise SystemExit("No labels produced for the requested window/hours. Check data coverage and hours.")
 
-    # ---- Build sequences for CNN-LSTM
-    fcols = feature_cols()
-    seq_len = cfg["model"]["seq_len"]
-    X, y, meta = build_sequences(feat, labels, fcols, seq_len=seq_len)
-    if len(X) == 0:
-        raise RuntimeError(
-            "No sequences built for training. "
-            "Causes: (a) insufficient history before 08:00, (b) strict dropna from indicators, "
-            "(c) too-long seq_len vs available data."
-        )
+    # ----------------- Train vs Test split by date --------------------------
+    tz = feat_df.index.tz
+    train_start = pd.Timestamp(cfg["data"]["train_start"], tz=tz)
+    train_end   = pd.Timestamp(cfg["data"]["train_end"],   tz=tz)
+    test_start  = pd.Timestamp(cfg["data"]["test_start"],  tz=tz) if "test_start" in cfg["data"] else None
+    test_end    = pd.Timestamp(cfg["data"]["test_end"],    tz=tz) if "test_end"   in cfg["data"] else None
 
-    n_features = len(fcols)
-    print(f"[INFO] Training tensors — X: {X.shape}, y: {y.shape}, features: {n_features}, seq_len: {seq_len}")
+    labels_train = labels[(labels.index >= train_start) & (labels.index <= train_end)]
+    labels_test  = pd.DataFrame()
+    if test_start is not None and test_end is not None:
+        labels_test = labels[(labels.index >= test_start) & (labels.index <= test_end)]
 
-    # ---- Build model
-    model = build_cnn_lstm(
-        seq_len=seq_len,
-        n_features=n_features,
-        cnn_filters=cfg["model"]["cnn_filters"],
-        cnn_kernel=cfg["model"]["cnn_kernel"],
-        lstm_units=cfg["model"]["lstm_units"],
-        dropout=cfg["model"]["dropout"],
-        lr=cfg["model"]["lr"],
-    )
+    # ----------------- Build sequences -------------------------------------
+    seq_len = int(cfg["model"]["seq_len"])
+    X_train, y_train = build_sequences(feat_df, labels_train, seq_len, feature_cols)
 
-    # ---- Train
+    if len(X_train) == 0:
+        raise SystemExit("No training sequences could be built. Try reducing seq_len or verifying data density.")
+
+    # Optional: validation from tail of train set (also controlled by validation_split)
+    print(f"[INFO] Train sequences: {X_train.shape}, positives={y_train.sum()}, negatives={(y_train==0).sum()}")
+
+    # ----------------- Model & Training ------------------------------------
+    model = build_cnn_lstm(seq_len, len(feature_cols), cfg)
     history = model.fit(
-        X, y,
+        X_train,
+        y_train,
         batch_size=cfg["train"]["batch_size"],
         epochs=cfg["train"]["epochs"],
         validation_split=cfg["train"]["validation_split"],
         shuffle=cfg["train"]["shuffle"],
-        verbose=2,
+        verbose=1,
     )
 
-    # ---- Save artifacts
-    model_path = os.path.join(cfg["runtime"]["model_dir"], "cnn_lstm_fx.h5")
-    model.save(model_path)
-    meta_path = os.path.join(cfg["runtime"]["out_dir"], "train_meta.json")
-    with open(meta_path, "w") as f:
-        json.dump(
-            {
-                "n_samples": int(len(y)),
-                "tickers": tickers,
-                "seq_len": seq_len,
-                "features": fcols,
-                "provider": cfg["data"].get("provider", "dukascopy"),
-                "train_start": cfg["data"]["train_start"],
-                "train_end": cfg["data"]["train_end"],
-            },
-            f,
-            indent=2,
-        )
+    # ----------------- Save model (keras + optional h5) ---------------------
+    model.save("models/cnn_lstm_fx.keras")
+    try:
+        model.save("models/cnn_lstm_fx.h5")
+    except Exception as e:
+        print("[WARN] Could not save .h5 fallback:", repr(e))
 
-    print(f"[INFO] Saved model → {model_path}")
-    print(f"[INFO] Saved meta  → {meta_path}")
-    print("[INFO] Training complete.")
+    # ----------------- Persist training artifacts ---------------------------
+    with open("artifacts/train_history.json", "w") as f:
+        json.dump(history.history, f)
+    with open("artifacts/train_shapes.json", "w") as f:
+        json.dump({
+            "X_train": list(X_train.shape),
+            "y_train": int(y_train.shape[0]),
+            "seq_len": seq_len,
+            "n_features": len(feature_cols)
+        }, f)
+    with open("artifacts/feature_columns.txt", "w") as f:
+        for c in feature_cols:
+            f.write(f"{c}\n")
 
+    print("[OK] Training complete. Saved models to models/ and logs to artifacts/.")
 
 if __name__ == "__main__":
-    # Ensure unbuffered output in CI if needed: set PYTHONUNBUFFERED=1 in workflow env
     main()
