@@ -4,6 +4,16 @@ import json
 import pandas as pd
 import tensorflow as tf
 
+# --- Loading keras ----
+from pathlib import Path
+import keras
+
+model_path = Path("models/cnn_lstm_fx.keras")
+if not model_path.exists():
+    raise FileNotFoundError("Model missing: models/cnn_lstm_fx.keras")
+model = keras.saving.load_model(model_path)
+# --- continue loading others ---
+
 from src.utils import load_config, now_london, get_env_list
 from src.features import add_indicators, feature_cols
 
