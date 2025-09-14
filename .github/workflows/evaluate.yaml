@@ -1,10 +1,9 @@
 name: Evaluate FX CNN-LSTM
 
 on:
-  workflow_dispatch:
-  schedule:
-    # Weekdays at 04:00 UTC (adjust as desired)
-    - cron: "0 4 * * 1-5"
+  workflow_dispatch: {}          # manual Run workflow button
+  # schedule:                    # optional: add a cron if you want
+  #   - cron: "30 4 * * 1-5"     # weekdays 04:30 UTC
 
 permissions:
   contents: read
@@ -21,55 +20,63 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Artifact scaffold
+      - name: Prepare artifacts folder
         run: |
           mkdir -p artifacts
           echo "evaluate start $(date -u +%FT%TZ)" > artifacts/hello.txt
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Download latest model artifact from Train
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh run download -R "$GITHUB_REPOSITORY" --name "model-and-artifacts" --dir .
-          ls -la models || true
-          ls -la artifacts || true
-
-
       - name: Install dependencies
         run: |
+          python -V
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip freeze | sed -n '1,120p'
 
-      - name: Export env (FX_TICKERS)
+      # (Optional) Use repo variable or secret for pairs; must match your Sheet tickers
+      - name: Export FX_TICKERS
         env:
           FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
         run: |
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
-          echo "Using pairs: ${FX_TICKERS}"
+          echo "Using pairs: ${FX_TICKERS:-EURUSD=X,GBPUSD=X}"
 
-      - name: Verify model exists
+      # ↓↓↓ This is the key step: fetch the model produced by the latest Train run ↓↓↓
+      - name: Download latest model artifact from Train
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          test -f models/cnn_lstm_fx.h5 || (echo 'Model missing: models/cnn_lstm_fx.h5. Run the Train workflow first.' && exit 1)
+          # Download the most recent artifact named exactly "model-and-artifacts"
+          gh run download -R "$GITHUB_REPOSITORY" --name "model-and-artifacts" --dir .
+          echo "Contents of models/:"
+          ls -la models || true
+          echo "Contents of artifacts/:"
+          ls -la artifacts || true
+
+      - name: Verify model present
+        run: |
+          if [ -f models/cnn_lstm_fx.keras ]; then
+            echo "Found models/cnn_lstm_fx.keras"
+          elif [ -f models/cnn_lstm_fx.h5 ]; then
+            echo "Found legacy models/cnn_lstm_fx.h5"
+          else
+            echo "ERROR: No model found (expected models/cnn_lstm_fx.keras or .h5)."
+            echo "Run the Train workflow first, then re-run Evaluate."
+            exit 1
+          fi
 
       - name: Run evaluation
         run: |
-          python -m src.evaluate 2>&1 | tee artifacts/eval_metrics.json
+          python -X faulthandler -m src.evaluate 2>&1 | tee -a artifacts/eval_log.txt
 
-      - name: Add metrics to job summary
-        if: always()
-        run: |
-          echo "## Evaluation Metrics" >> $GITHUB_STEP_SUMMARY
-          cat artifacts/eval_metrics.json >> $GITHUB_STEP_SUMMARY || true
-
-      - name: Upload evaluation artifact
+      - name: Upload evaluation artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-metrics
-          path: artifacts/eval_metrics.json
-          if-no-files-found: warn
+          name: eval-artifacts
+          path: |
+            artifacts/
