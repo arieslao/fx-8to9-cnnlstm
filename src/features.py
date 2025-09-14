@@ -1,52 +1,45 @@
+# src/features.py
+from __future__ import annotations
 import pandas as pd
-import numpy as np
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator, SMAIndicator, MACD
-from ta.volatility import BollingerBands, AverageTrueRange
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["ret_1"] = df["Close"].pct_change()
-    df["ret_4"] = df["Close"].pct_change(4)
-    df["ret_24"] = df["Close"].pct_change(24)
+def to_interval(df: pd.DataFrame, interval: str, tz_name: str = "Europe/London") -> pd.DataFrame:
+    """
+    Convert 1H OHLCV per-pair data to the requested interval.
 
-    rsi = RSIIndicator(df["Close"], window=14)
-    df["rsi"] = rsi.rsi()
+    Supported:
+      - '1h' : passthrough
+      - '4h' : resample to 4-hour bars anchored at 01:00 (London), yielding bars
+               at 01,05,09,13,17,21 so that 05:00 and 13:00 exist.
 
-    ema20 = EMAIndicator(df["Close"], window=20)
-    ema50 = EMAIndicator(df["Close"], window=50)
-    sma200 = SMAIndicator(df["Close"], window=200)
-    df["ema20"] = ema20.ema_indicator()
-    df["ema50"] = ema50.ema_indicator()
-    df["sma200"] = sma200.sma_indicator()
+    Expects:
+      - tz-aware DateTimeIndex
+      - columns: ['Open','High','Low','Close','Volume','Ticker']
 
-    macd = MACD(df["Close"], window_slow=26, window_fast=12, window_sign=9)
-    df["macd"] = macd.macd()
-    df["macd_signal"] = macd.macd_signal()
-    df["macd_hist"] = macd.macd_diff()
+    Returns a DataFrame with the same columns, resampled and sorted by index.
+    """
+    if df.empty or (interval and interval.lower() == "1h"):
+        return df
 
-    bb = BollingerBands(df["Close"], window=20, window_dev=2)
-    df["bb_high"] = bb.bollinger_hband()
-    df["bb_low"]  = bb.bollinger_lband()
-    df["bb_w"]    = (df["bb_high"] - df["bb_low"]) / df["Close"]
+    if interval.lower() != "4h":
+        raise ValueError(f"Unsupported interval: {interval}")
 
-    atr = AverageTrueRange(df["High"], df["Low"], df["Close"], window=14)
-    df["atr"] = atr.average_true_range()
+    out = []
+    # Resample per ticker to keep proper OHLCV semantics
+    for t, d in df.groupby("Ticker"):
+        d = d.sort_index()
+        r = (
+            d[["Open", "High", "Low", "Close", "Volume"]]
+            .resample("4h", origin="start_day", offset="1h")
+            .agg({
+                "Open": "first",
+                "High": "max",
+                "Low":  "min",
+                "Close":"last",
+                "Volume":"sum"
+            })
+            .dropna(how="any")
+        )
+        r["Ticker"] = t
+        out.append(r)
 
-    # Normalized volumes
-    df["vol_ema20"] = df["Volume"].ewm(span=20).mean()
-    df["vol_norm"] = df["Volume"] / (df["vol_ema20"] + 1e-9)
-
-    # Drop initial NaNs from indicators
-    df = df.dropna()
-
-    return df
-
-def feature_cols():
-    return [
-        "Open","High","Low","Close","Volume",
-        "ret_1","ret_4","ret_24",
-        "rsi","ema20","ema50","sma200",
-        "macd","macd_signal","macd_hist",
-        "bb_high","bb_low","bb_w","atr","vol_norm"
-    ]
+    return pd.concat(out).sort_index()
