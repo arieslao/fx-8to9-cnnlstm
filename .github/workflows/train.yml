@@ -3,8 +3,7 @@ name: Train FX CNN-LSTM
 on:
   workflow_dispatch: {}
   schedule:
-    # Weekdays ~03:15 UTC (adjust as you like)
-    - cron: "15 3 * * 1-5"
+    - cron: "15 3 * * 1-5"  # weekdays 03:15 UTC
 
 permissions:
   contents: read
@@ -21,19 +20,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare artifacts folder
-        run: |
-          mkdir -p artifacts
-          echo "train start $(date -u +%FT%TZ)" > artifacts/hello.txt
-
-      - name: Show service account email (sanity)
-        run: |
-          python - << 'PY'
-import os, json
-info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-print("Service account:", info.get("client_email","<missing>"))
-PY
-
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -41,17 +27,8 @@ PY
 
       - name: Install dependencies
         run: |
-          python -V
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip freeze | sed -n '1,120p'
-
-      - name: Export FX_TICKERS
-        env:
-          FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
-        run: |
-          echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
-          echo "Using pairs: ${FX_TICKERS:-EURUSD=X,GBPUSD=X,USDJPY=X}"
 
       - name: Smoke read from Google Sheets
         run: |
@@ -77,6 +54,7 @@ PY
 
       - name: Train model
         run: |
+          mkdir -p models artifacts
           python -X faulthandler -m src.train 2>&1 | tee -a artifacts/train_log.txt
 
       - name: Verify outputs (.keras only)
@@ -86,7 +64,6 @@ PY
             ls -la models || true
             exit 1
           fi
-          echo "Saved models:" | tee -a artifacts/train_log.txt
           ls -la models | tee -a artifacts/train_log.txt
           ls -la artifacts || true
 
