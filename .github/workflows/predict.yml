@@ -1,13 +1,14 @@
-name: Predict Daily FX Direction (09→13)
+name: Predict Daily FX Direction (09→13 snapped)
 
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: "55 7 * * 1-5"   # ~08:55 London when UK is UTC+1; adjust as desired
+    # ~08:55 London during BST (UTC+1). Adjust if you prefer a different time.
+    - cron: "55 7 * * 1-5"
 
 permissions:
   contents: read
-  actions: read
+  actions: read    # needed so we can download the Train run artifact via gh
 
 jobs:
   predict:
@@ -18,39 +19,52 @@ jobs:
       PYTHONUNBUFFERED: "1"
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install deps
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Export FX_TICKERS
-        env: { FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }} }
+        env:
+          FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
         run: |
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
           echo "Using pairs: ${FX_TICKERS:-EURUSD=X,GBPUSD=X,USDJPY=X}"
 
-      # Download latest trained model artifact
-      - name: Download model from latest successful Train run
-        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
+      - name: Download latest trained model artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Find the most recent successful "Train FX CNN-LSTM" run on main
           RUN_ID=$(gh run list \
             --workflow "Train FX CNN-LSTM" \
             --branch main \
-            --json databaseId,conclusion,status \
+            --json databaseId,conclusion,status,createdAt \
             -q '[.[] | select(.conclusion=="success" and .status=="completed")][0].databaseId')
-          if [ -z "$RUN_ID" ]; then echo "Run Train first"; exit 1; fi
+
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful Train run found. Run the training workflow first."
+            exit 1
+          fi
+
+          echo "Using Train run id: $RUN_ID"
           mkdir -p _train_artifact
           gh run download "$RUN_ID" --name "model-and-artifacts" --dir _train_artifact
+
           mkdir -p models artifacts
           rsync -a _train_artifact/models/ models/ || true
           rsync -a _train_artifact/artifacts/ artifacts/ || true
           ls -la models || true
 
-      - name: Run predict
+      - name: Predict snapped 09→13 and write to Sheet
         run: |
           python -X faulthandler -m src.predict_daily 2>&1 | tee -a artifacts/predict_log.txt
 
@@ -60,3 +74,4 @@ jobs:
         with:
           name: predict-artifacts
           path: artifacts/
+          if-no-files-found: warn
