@@ -1,27 +1,26 @@
 data:
-  provider: "sheet"                 # <- new provider (sheet | dukascopy | yahoo)
-  interval: "4h"                    # still used elsewhere (features etc.)
-  lookback_hours: 72
+  provider: "sheet"
+  interval: "4h"                 # data in the Sheet is already 4h
+  lookback_hours: 72             # context window = 18 x 4h bars
   train_start: "2024-01-01"
-  train_end: "2024-12-31"
-  test_start: "2025-01-01"
-  test_end: "2025-12-31"
+  train_end:   "2024-12-31"
+  test_start:  "2025-01-01"
+  test_end:    "2025-12-31"
   timezone: "Europe/London"
   trading_days_only: true
   sheet:
-    id: "1GpTpffMqG8ZyWUCShSBcnKwiyE94X6b3igzFbDK3h4E"   # the long ID in the URL
-    worksheet: "fx_1h"                    # tab name you'll create
-
+    id: "<YOUR_SHEET_ID>"
+    worksheet: "fx_4h_data"      # <- your new 4h tab
 
 label:
   target_window:
-    start_hour: 5             # 08:00 London
-    end_hour: 13               # 13:00 London
-  direction_threshold: 0.0    # >0 up, <=0 down
+    start_hour: 9                # 09:00 London
+    end_hour:   13               # 13:00 London
+  direction_threshold: 0.0
 
 model:
-  seq_len: 18                 # matches lookback_hours
-  n_features: 20              # placeholder; actual value inferred from features.py
+  seq_len: 18                    # 72h / 4h = 18 steps
+  n_features: 20
   cnn_filters: 32
   cnn_kernel: 3
   lstm_units: 64
