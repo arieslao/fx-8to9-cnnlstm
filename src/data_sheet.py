@@ -13,7 +13,7 @@ from google.oauth2.service_account import Credentials
 
 # Expected columns in your Google Sheet tabs holding OHLC:
 REQUIRED_COLS = [
-    "Timestamp", "Ticker", "Open", "High", "Low", "Close", "Volume"
+    "Timestamp", "Pair", "Open", "High", "Low", "Close", "Volume"
 ]
 
 # ----------------------------
@@ -138,7 +138,7 @@ def _coerce_and_filter(
 
     # Standardize the column used downstream
     df = df.rename(columns={"Pair": "Ticker"})
-    return df[["Ticker", "Open", "High", "Low", "Close", "Volume"]]
+    return df[["Pair", "Open", "High", "Low", "Close", "Volume"]]
 
 
 def concat_pairs_sheet(
@@ -150,18 +150,18 @@ def concat_pairs_sheet(
     worksheet: str,
 ) -> pd.DataFrame:
     """
-    Return a tidy DataFrame of OHLC rows for the requested tickers from a sheet tab.
-    Columns returned: ['Ticker','Open','High','Low','Close','Volume']
+    Return a tidy DataFrame of OHLC rows for the requested pairs from a sheet tab.
+    Columns returned: ['Pair','Open','High','Low','Close','Volume']
     Index: timezone-aware DatetimeIndex in tz_name (e.g., Europe/London)
     """
     raw = _read_tab_as_dataframe(sheet_id, worksheet)
     if raw.empty:
-        return pd.DataFrame(columns=["Ticker", "Open", "High", "Low", "Close", "Volume"])
+        return pd.DataFrame(columns=["Pairs", "Open", "High", "Low", "Close", "Volume"])
 
     df = _coerce_and_filter(raw, start=start, end=end, tz_name=tz_name)
     wanted = [t.strip() for t in tickers if t and t.strip()]
     if wanted:
-        df = df[df["Ticker"].isin(wanted)]
+        df = df[df["Pair"].isin(wanted)]
     return df
 
 
