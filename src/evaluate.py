@@ -53,8 +53,8 @@ def build_sequences(features: pd.DataFrame, labels: pd.DataFrame, seq_len: int, 
     X, y = [], []
     features = features.sort_index()
     labels = labels.sort_index()
-    for tkr, lab_tkr in labels.groupby("Ticker"):
-        feat_tkr = features[features["Ticker"] == tkr]
+    for tkr, lab_tkr in labels.groupby("Paier"):
+        feat_tkr = features[features["Pair"] == tkr]
         if feat_tkr.empty: continue
         idx = feat_tkr.index
         for ts, row in lab_tkr.iterrows():
@@ -97,18 +97,18 @@ def main():
 
     # features consistent with training
     feat = df.copy()
-    feat["ret_close_1"] = feat.groupby("Ticker")["Close"].pct_change()
+    feat["ret_close_1"] = feat.groupby("Pair")["Close"].pct_change()
     for w in (5, 10):
-        roll_mean = feat.groupby("Ticker")["Close"].transform(lambda s: s.rolling(w, min_periods=3).mean())
-        roll_std  = feat.groupby("Ticker")["Close"].transform(lambda s: s.rolling(w, min_periods=3).std())
+        roll_mean = feat.groupby("Paier")["Close"].transform(lambda s: s.rolling(w, min_periods=3).mean())
+        roll_std  = feat.groupby("Pair")["Close"].transform(lambda s: s.rolling(w, min_periods=3).std())
         feat[f"z_close_{w}"] = (feat["Close"] - roll_mean) / (roll_std.replace(0, np.nan))
     feat["hl_range"] = (feat["High"] - feat["Low"]) / feat["Close"].replace(0, np.nan)
     feat["body"]     = (feat["Close"] - feat["Open"]) / feat["Close"].replace(0, np.nan)
-    feat["vol_10"]   = feat.groupby("Ticker")["ret_close_1"].transform(lambda s: s.rolling(10, min_periods=5).std())
+    feat["vol_10"]   = feat.groupby("Pair")["ret_close_1"].transform(lambda s: s.rolling(10, min_periods=5).std())
     feat = feat.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     base_cols = ["Open","High","Low","Close","Volume"]
-    extra_cols = [c for c in feat.columns if c not in base_cols + ["Ticker"]]
+    extra_cols = [c for c in feat.columns if c not in base_cols + ["Pair"]]
     feature_cols = base_cols + extra_cols
 
     # --- auto-snap labels for 09->13 ---
