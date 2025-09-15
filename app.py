@@ -1,58 +1,37 @@
-# app.py
-import os, glob, json
+import os
 import pandas as pd
 import streamlit as st
+from src.data_sheet import _sheets_client, _open_sheet
 
-# --- Your exact pairs (deduped) ---
-PAIRS = [
-    "EURUSD=X","GBPUSD=X","USDJPY=X","AUDUSD=X",
-    "EURJPY=X","USDCAD=X","USDCHF=X","NZDUSD=X",
-]
+st.set_page_config(page_title="FX 4H – 09→13 predictions", layout="wide")
 
-st.set_page_config(page_title="FX 8→9 London Predictions", layout="centered")
-st.title("FX 8→9 London Predictions")
-st.caption("Shows the most recent predictions saved by the GitHub Action / predict script.")
+SHEET_ID = st.secrets.get("SHEET_ID") or os.getenv("SHEET_ID")
+TAB_DATA = "fx_4h_data"
+TAB_PREDS = "preds_8to9"
 
-# Prefer fixed filename if you added 'pred_latest.json'; otherwise use newest dated file
-latest_fixed = os.path.join("artifacts", "pred_latest.json")
-files = sorted(glob.glob(os.path.join("artifacts", "pred_*.json")))
-
-data = None
-src = None
-if os.path.exists(latest_fixed):
-    with open(latest_fixed, "r") as f:
-        data = json.load(f)
-    src = latest_fixed
-elif files:
-    with open(files[-1], "r") as f:
-        data = json.load(f)
-    src = files[-1]
-
-if not data:
-    st.warning("No prediction files found in artifacts/. Run the **Predict 8→9 London** workflow (or run locally) to generate one.")
+if not SHEET_ID:
+    st.error("Set SHEET_ID (Streamlit secret or env).")
     st.stop()
 
-st.caption(f"Source: `{src}`")
-df = pd.DataFrame(data.get("predictions", []))
+gc = _sheets_client()
+sh = _open_sheet(gc, SHEET_ID)
 
-# Filter to your pairs & tidy
-df = df[df["Ticker"].isin(PAIRS)].copy()
-if df.empty:
-    st.info("Prediction file exists, but none of your configured pairs were found. Check that FX_TICKERS matches the pairs above.")
+def read_tab(tab: str) -> pd.DataFrame:
+    rows = sh.worksheet(tab).get_all_values()
+    if not rows: return pd.DataFrame()
+    header, *data = rows
+    return pd.DataFrame(data, columns=header)
+
+st.header("Predictions – 09→13 London")
+preds = read_tab(TAB_PREDS)
+data = read_tab(TAB_DATA)
+
+if not preds.empty:
+    preds["proba_up"] = pd.to_numeric(preds["proba_up"], errors="coerce")
+    st.dataframe(preds.tail(50), use_container_width=True)
 else:
-    # Order by your PAIRS list
-    df["order"] = df["Ticker"].apply(lambda t: PAIRS.index(t) if t in PAIRS else 999)
-    df = df.sort_values("order").drop(columns=["order"])
+    st.info("No predictions yet.")
 
-    # Nice column order if present
-    cols = [c for c in ["Ticker","prob_up_8to9","signal","status"] if c in df.columns]
-    df = df[cols + [c for c in df.columns if c not in cols]]
-
-    # Display
-    st.dataframe(df, use_container_width=True)
-
-    if "prob_up_8to9" in df.columns:
-        st.subheader("Probability Up 8→9 (per pair)")
-        st.bar_chart(df.set_index("Ticker")["prob_up_8to9"])
-
-    st.caption("Signal rule: LONG if prob ≥ 0.5, else SHORT. (Purely informational; not financial advice.)")
+if not data.empty:
+    st.subheader("Latest 4H OHLC (fx_4h_data)")
+    st.dataframe(data.tail(50), use_container_width=True)
