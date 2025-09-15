@@ -34,24 +34,24 @@ jobs:
       - name: Smoke read from Google Sheets
         run: |
           python - << 'PY'
-import os, sys
-from src.utils import load_config
-from src.data_sheet import concat_pairs_sheet
-cfg = load_config()
-pairs = (os.getenv("FX_TICKERS") or "EURUSD=X").split(",")
-df = concat_pairs_sheet(
-    tickers=pairs,
-    start=cfg["data"]["train_start"],
-    end=cfg["data"]["train_end"],
-    tz_name=cfg["data"]["timezone"],
-    sheet_id=cfg["data"]["sheet"]["id"],
-    worksheet=cfg["data"]["sheet"]["worksheet"],
-)
-print("[SMOKE] rows:", len(df))
-print(df.head(3))
-if df.empty:
-    sys.exit("No rows read from sheet — check Sheet ID/tab name, sharing, and date range.")
-PY
+            import os, sys
+            from src.utils import load_config
+            from src.data_sheet import concat_pairs_sheet
+            cfg = load_config()
+            pairs = (os.getenv("FX_TICKERS") or "EURUSD=X").split(",")
+            df = concat_pairs_sheet(
+                tickers=pairs,
+                start=cfg["data"]["train_start"],
+                end=cfg["data"]["train_end"],
+                tz_name=cfg["data"]["timezone"],
+                sheet_id=cfg["data"]["sheet"]["id"],
+                worksheet=cfg["data"]["sheet"]["worksheet"],
+            )
+            print("[SMOKE] rows:", len(df))
+            print(df.head(3))
+            if df.empty:
+                sys.exit("No rows read from sheet — check Sheet ID/tab name, sharing, and date range.")
+            PY
 
       - name: Train model
         run: |
