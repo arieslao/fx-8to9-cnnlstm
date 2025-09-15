@@ -49,9 +49,9 @@ jobs:
             )
           print("[SMOKE] rows:", len(df))
           print(df.head(3))
-            if df.empty:
-                sys.exit("No rows read from sheet — check Sheet ID/tab name, sharing, and date range.")
-            PY
+          if df.empty:
+              sys.exit("No rows read from sheet — check Sheet ID/tab name, sharing, and date range.")
+          PY
 
       - name: Train model
         run: |
