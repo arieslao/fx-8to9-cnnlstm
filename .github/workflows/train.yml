@@ -34,7 +34,7 @@ jobs:
       - name: Smoke read from Google Sheets
         run: |
           python - << 'PY'
-            import os, sys
+          import os, sys
             from src.utils import load_config
             from src.data_sheet import concat_pairs_sheet
             cfg = load_config()
