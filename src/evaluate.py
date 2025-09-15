@@ -11,9 +11,9 @@ import keras
 from src.utils import load_config
 from src.data_sheet import concat_pairs_sheet
 from src.features import to_interval
-from src.labels import make_window_label
+from src.labels import make_window_label_auto
 
-# ---------- minimal Sheets writer (no extra file needed) ----------
+# --- Sheets writer (inline) ---
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -30,10 +30,8 @@ def _append_eval_rows(sheet_id: str, worksheet: str, run_id: str, window_start: 
         ws.append_row(["RunId","window_start","window_end","metric","value","created_at"])
     now = datetime.now(timezone.utc).isoformat()
     rows = [[run_id, window_start, window_end, k, float(v), now] for k, v in metrics.items()]
-    # write in one batch
     ws.append_rows(rows, value_input_option="USER_ENTERED")
 
-# ---------- metrics helpers (no sklearn dependency) ----------
 def _safe_div(a, b):
     return (a / b) if b else 0.0
 
@@ -43,42 +41,28 @@ def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, thr: float = 0.5) ->
     tn = int(((y_pred == 0) & (y_true == 0)).sum())
     fp = int(((y_pred == 1) & (y_true == 0)).sum())
     fn = int(((y_pred == 0) & (y_true == 1)).sum())
-
     acc = _safe_div(tp + tn, tp + tn + fp + fn)
     prec = _safe_div(tp, tp + fp)
     rec = _safe_div(tp, tp + fn)
     f1 = _safe_div(2 * prec * rec, (prec + rec)) if (prec + rec) else 0.0
-    # Matthews Correlation Coefficient
     denom = np.sqrt((tp + fp)*(tp + fn)*(tn + fp)*(tn + fn))
     mcc = ((tp * tn - fp * fn) / denom) if denom else 0.0
+    return {"accuracy": acc, "precision": prec, "recall": rec, "f1": f1, "mcc": mcc, "tp": tp, "tn": tn, "fp": fp, "fn": fn}
 
-    return {
-        "accuracy": round(float(acc), 6),
-        "precision": round(float(prec), 6),
-        "recall": round(float(rec), 6),
-        "f1": round(float(f1), 6),
-        "mcc": round(float(mcc), 6),
-        "tp": tp, "tn": tn, "fp": fp, "fn": fn,
-    }
-
-# ---------- sequence builder (same rule as train: no leakage) ----------
 def build_sequences(features: pd.DataFrame, labels: pd.DataFrame, seq_len: int, feature_cols: list[str]):
     X, y = [], []
     features = features.sort_index()
     labels = labels.sort_index()
     for tkr, lab_tkr in labels.groupby("Ticker"):
         feat_tkr = features[features["Ticker"] == tkr]
-        if feat_tkr.empty:
-            continue
+        if feat_tkr.empty: continue
         idx = feat_tkr.index
         for ts, row in lab_tkr.iterrows():
-            end_loc = idx.searchsorted(ts)  # strictly before label time
+            end_loc = idx.searchsorted(ts)
             start_loc = end_loc - seq_len
-            if start_loc < 0:
-                continue
+            if start_loc < 0: continue
             window = feat_tkr.iloc[start_loc:end_loc]
-            if len(window) != seq_len:
-                continue
+            if len(window) != seq_len: continue
             X.append(window[feature_cols].to_numpy(dtype=np.float32))
             y.append(int(row["label"]))
     if not X:
@@ -89,18 +73,14 @@ def main():
     os.makedirs("artifacts", exist_ok=True)
     cfg = load_config()
 
-    # 1) Load model (.keras preferred; .h5 fallback)
+    # load model
     model_path = Path("models/cnn_lstm_fx.keras")
     if not model_path.exists():
         alt = Path("models/cnn_lstm_fx.h5")
-        if alt.exists():
-            model_path = alt
-        else:
-            raise FileNotFoundError("Model missing: models/cnn_lstm_fx.keras (or .h5)")
-
+        if alt.exists(): model_path = alt
+        else: raise FileNotFoundError("Model missing: models/cnn_lstm_fx.keras (or .h5)")
     model = keras.saving.load_model(model_path)
 
-    # 2) Pull TEST window from Google Sheets and resample to interval (4h)
     pairs = (os.getenv("FX_TICKERS") or "EURUSD=X,GBPUSD=X").split(",")
     pairs = [p.strip() for p in pairs if p.strip()]
 
@@ -113,12 +93,11 @@ def main():
         worksheet=cfg["data"]["sheet"]["worksheet"],
     )
     if df.empty:
-        raise SystemExit("No test rows from sheet. Check date range / Sheet content.")
+        raise SystemExit("No test rows from sheet.")
 
     df = to_interval(df, cfg["data"]["interval"], cfg["data"]["timezone"])
 
-    # 3) Rebuild feature columns *exactly* like training
-    # (Keep this in sync with src/train.py:build_features)
+    # features consistent with training
     feat = df.copy()
     feat["ret_close_1"] = feat.groupby("Ticker")["Close"].pct_change()
     for w in (5, 10):
@@ -134,38 +113,35 @@ def main():
     extra_cols = [c for c in feat.columns if c not in base_cols + ["Ticker"]]
     feature_cols = base_cols + extra_cols
 
-    # 4) Labels for 05 -> 13 (driven by config)
-    labels = make_window_label(
+    # --- auto-snap labels for 09->13 ---
+    labels = make_window_label_auto(
         feat,
         cfg["label"]["target_window"]["start_hour"],
         cfg["label"]["target_window"]["end_hour"],
-        cfg["label"]["direction_threshold"],
         ticker_col="Ticker",
         price_col="Close",
         trading_days_only=cfg["data"]["trading_days_only"],
+        duration_hours=4,
+        snap_tolerance_hours=2.1,
     )
     if labels.empty:
-        raise SystemExit("No labels in test window (need both 05:00 and 13:00 bars).")
+        raise SystemExit("No labels found in test window after snapping.")
 
-    # 5) Build sequences and evaluate
     seq_len = int(cfg["model"]["seq_len"])
     X, y_true = build_sequences(feat, labels, seq_len, feature_cols)
     if len(X) == 0:
-        raise SystemExit("No test sequences could be built. Verify seq_len and test coverage.")
+        raise SystemExit("No sequences could be built for evaluation.")
 
     y_prob = model.predict(X, verbose=0).reshape(-1)
     metrics = compute_metrics(y_true, y_prob, thr=0.5)
 
-    # 6) Print + save artifacts
     print("===== Evaluation Metrics =====")
     for k, v in metrics.items():
-        print(f"{k}: {v}")
+        print(f"{k}: {v:.6f}" if isinstance(v, float) else f"{k}: {v}")
 
-    os.makedirs("artifacts", exist_ok=True)
-    with open("artifacts/eval_metrics.json", "w") as f:
-        json.dump(metrics, f, indent=2)
+    with open("artifacts/eval_metrics.json","w") as f:
+        json.dump({k: (float(v) if isinstance(v, (np.floating, float)) else v) for k,v in metrics.items()}, f, indent=2)
 
-    # 7) Append to Google Sheet (eval_daily)
     run_id = os.getenv("GITHUB_RUN_ID", datetime.now(timezone.utc).strftime("local-%Y%m%d%H%M%S"))
     _append_eval_rows(
         cfg["data"]["sheet"]["id"],
@@ -175,7 +151,8 @@ def main():
         cfg["data"]["test_end"],
         metrics
     )
-    print("[OK] Evaluation metrics written to artifacts/ and to Sheets tab 'eval_daily'.")
+    print("[OK] Evaluation written to artifacts/ and Sheets tab 'eval_daily'.")
+
 
 if __name__ == "__main__":
     main()
