@@ -74,12 +74,10 @@ def main():
     cfg = load_config()
 
     # load model
-    model_path = Path("models/cnn_lstm_fx.keras")
-    if not model_path.exists():
-        alt = Path("models/cnn_lstm_fx.h5")
-        if alt.exists(): model_path = alt
-        else: raise FileNotFoundError("Model missing: models/cnn_lstm_fx.keras (or .h5)")
-    model = keras.saving.load_model(model_path)
+    MODEL_PATH = Path("models/cnn_lstm_fx.keras")
+    if not MODEL_PATH.exists():
+        raise FileNotFoundError("Model missing: models/cnn_lstm_fx.keras")
+    model = keras.saving.load_model(MODEL_PATH)
 
     pairs = (os.getenv("FX_TICKERS") or "EURUSD=X,GBPUSD=X").split(",")
     pairs = [p.strip() for p in pairs if p.strip()]
