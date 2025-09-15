@@ -9,7 +9,7 @@ data:
   timezone: "Europe/London"
   trading_days_only: true
   sheet:
-    id: "<YOUR_SHEET_ID>"
+    id: "1GpTpffMqG8ZyWUCShSBcnKwiyE94X6b3igzFbDK3h4E"
     worksheet: "fx_4h_data"      # <- your new 4h tab
 
 label:
