@@ -1,13 +1,13 @@
-name: Predict Daily FX Direction (08→09 London)
+name: Predict Daily FX Direction (09→13)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   schedule:
-    # Weekdays at 07:10 UTC (08:10 London during winter; adjust for DST as needed)
-    - cron: "10 7 * * 1-5"
+    - cron: "55 7 * * 1-5"   # ~08:55 London when UK is UTC+1; adjust as desired
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   predict:
@@ -18,43 +18,45 @@ jobs:
       PYTHONUNBUFFERED: "1"
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
 
-      - name: Artifact scaffold
-        run: |
-          mkdir -p artifacts
-          echo "predict start $(date -u +%FT%TZ)" > artifacts/hello.txt
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Export env (FX_TICKERS)
-        env:
-          FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
+      - name: Export FX_TICKERS
+        env: { FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }} }
         run: |
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
-          echo "Using pairs: ${FX_TICKERS}"
+          echo "Using pairs: ${FX_TICKERS:-EURUSD=X,GBPUSD=X,USDJPY=X}"
 
-      - name: Verify model exists
+      # Download latest trained model artifact
+      - name: Download model from latest successful Train run
+        env: { GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} }
         run: |
-          test -f models/cnn_lstm_fx.h5 || (echo 'Model missing: models/cnn_lstm_fx.h5. Run the Train workflow first.' && exit 1)
+          RUN_ID=$(gh run list \
+            --workflow "Train FX CNN-LSTM" \
+            --branch main \
+            --json databaseId,conclusion,status \
+            -q '[.[] | select(.conclusion=="success" and .status=="completed")][0].databaseId')
+          if [ -z "$RUN_ID" ]; then echo "Run Train first"; exit 1; fi
+          mkdir -p _train_artifact
+          gh run download "$RUN_ID" --name "model-and-artifacts" --dir _train_artifact
+          mkdir -p models artifacts
+          rsync -a _train_artifact/models/ models/ || true
+          rsync -a _train_artifact/artifacts/ artifacts/ || true
+          ls -la models || true
 
-      - name: Predict
+      - name: Run predict
         run: |
-          python -m src.predict_daily 2>&1 | tee artifacts/predict_log.txt
+          python -X faulthandler -m src.predict_daily 2>&1 | tee -a artifacts/predict_log.txt
 
-      - name: Upload predictions
+      - name: Upload predict artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: predictions
-          path: artifacts/predict_log.txt
-          if-no-files-found: warn
+          name: predict-artifacts
+          path: artifacts/
