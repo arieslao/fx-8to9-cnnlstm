@@ -1,9 +1,10 @@
-name: Train FX CNN-LSTM Model
+name: Train FX CNN-LSTM
 
 on:
-  workflow_dispatch: {}    # shows the "Run workflow" button
+  workflow_dispatch: {}
   schedule:
-    - cron: "15 3 * * 1-5" # optional: weekdays 03:15 UTC
+    # Weekdays ~03:15 UTC (adjust as you like)
+    - cron: "15 3 * * 1-5"
 
 permissions:
   contents: read
@@ -25,13 +26,13 @@ jobs:
           mkdir -p artifacts
           echo "train start $(date -u +%FT%TZ)" > artifacts/hello.txt
 
-      - name: Show workspace (quick sanity)
+      - name: Show service account email (sanity)
         run: |
-          pwd
-          git rev-parse --abbrev-ref HEAD || true
-          ls -la
-          echo "---- first lines of config.yaml ----"
-          sed -n '1,120p' config.yaml || true
+          python - << 'PY'
+import os, json
+info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+print("Service account:", info.get("client_email","<missing>"))
+PY
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -45,45 +46,47 @@ jobs:
           pip install -r requirements.txt
           pip freeze | sed -n '1,120p'
 
-      - name: Export FX_TICKERS (optional)
+      - name: Export FX_TICKERS
         env:
           FX_TICKERS: ${{ vars.FX_TICKERS || secrets.FX_TICKERS }}
         run: |
           echo "FX_TICKERS=${FX_TICKERS}" >> $GITHUB_ENV
-          echo "Using pairs: ${FX_TICKERS}"
+          echo "Using pairs: ${FX_TICKERS:-EURUSD=X,GBPUSD=X,USDJPY=X}"
 
       - name: Smoke read from Google Sheets
         run: |
           python - << 'PY'
-          import os, sys
-          from src.utils import load_config
-          from src.data_sheet import concat_pairs_sheet
-          cfg = load_config()
-          pairs = (os.getenv("FX_TICKERS") or "EURUSD=X").split(",")
-          df = concat_pairs_sheet(
-              pairs,
-              cfg["data"]["train_start"],
-              cfg["data"]["train_end"],
-              cfg["data"]["timezone"],
-              cfg["data"]["sheet"]["id"],
-              cfg["data"]["sheet"]["worksheet"],
-          )
-          print("Rows from sheet:", len(df))
-          print(df.head(3))
-          if df.empty:
-              sys.exit("No rows read from sheet — check Sheet ID/tab name, sharing, and date range.")
-          PY
+import os, sys
+from src.utils import load_config
+from src.data_sheet import concat_pairs_sheet
+cfg = load_config()
+pairs = (os.getenv("FX_TICKERS") or "EURUSD=X").split(",")
+df = concat_pairs_sheet(
+    tickers=pairs,
+    start=cfg["data"]["train_start"],
+    end=cfg["data"]["train_end"],
+    tz_name=cfg["data"]["timezone"],
+    sheet_id=cfg["data"]["sheet"]["id"],
+    worksheet=cfg["data"]["sheet"]["worksheet"],
+)
+print("[SMOKE] rows:", len(df))
+print(df.head(3))
+if df.empty:
+    sys.exit("No rows read from sheet — check Sheet ID/tab name, sharing, and date range.")
+PY
 
       - name: Train model
         run: |
           python -X faulthandler -m src.train 2>&1 | tee -a artifacts/train_log.txt
 
-      - name: Verify outputs
+      - name: Verify outputs (.keras only)
         run: |
-          if [ ! -f models/cnn_lstm_fx.h5 ]; then
-            echo 'Model missing: models/cnn_lstm_fx.h5' | tee -a artifacts/train_log.txt
+          if [ ! -f models/cnn_lstm_fx.keras ]; then
+            echo 'Model missing: models/cnn_lstm_fx.keras' | tee -a artifacts/train_log.txt
+            ls -la models || true
             exit 1
           fi
+          echo "Saved models:" | tee -a artifacts/train_log.txt
           ls -la models | tee -a artifacts/train_log.txt
           ls -la artifacts || true
 
