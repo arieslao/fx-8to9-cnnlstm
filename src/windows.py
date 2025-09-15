@@ -1,23 +1,32 @@
+from __future__ import annotations
+from typing import Tuple, List
 import numpy as np
 import pandas as pd
 
-def build_sequences(full_df: pd.DataFrame, label_df: pd.DataFrame, feature_cols, seq_len=72):
+def build_sequences(
+    df: pd.DataFrame,
+    seq_len: int,
+    feature_cols: list[str]
+) -> Tuple[np.ndarray, list[pd.Timestamp], list[str]]:
     """
-    For each 08:00 sample (label_df index = 08:00 ts), grab previous `seq_len` hours
-    from full_df for the same ticker, and build X,y.
+    Build rolling sequences per Pair.
+    Returns:
+      X: [N, seq_len, F]
+      t_end: list of timestamps corresponding to each window end
+      pairs: list of Pair (length N)
     """
-    X, y, meta = [], [], []
+    X_list: List[np.ndarray] = []
+    t_end: List[pd.Timestamp] = []
+    pairs: List[str] = []
 
-    # Reindex label_df to ensure datetime index
-    for ts, row in label_df.iterrows():
-        ticker = row["Ticker"]
-        start = ts - pd.Timedelta(hours=seq_len)
-        hist = full_df[(full_df["Ticker"]==ticker) & (full_df.index > start) & (full_df.index <= ts)]
-        if len(hist) < seq_len:
-            continue
-        seq = hist[feature_cols].values[-seq_len:]
-        X.append(seq)
-        y.append(row["label"])
-        meta.append({"ts": ts, "Ticker": ticker})
+    for pair, g in df.groupby("Pair", sort=False):
+        g = g.sort_index()
+        arr = g[feature_cols].to_numpy(dtype="float32")
+        # build windows
+        for i in range(len(g) - seq_len + 1):
+            X_list.append(arr[i : i + seq_len])
+            t_end.append(g.index[i + seq_len - 1])
+            pairs.append(pair)
 
-    return np.array(X), np.array(y), meta
+    X = np.stack(X_list, axis=0) if X_list else np.zeros((0, seq_len, len(feature_cols)), dtype="float32")
+    return X, t_end, pairs
