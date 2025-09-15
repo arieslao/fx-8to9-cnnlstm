@@ -26,7 +26,7 @@ def make_features(df: pd.DataFrame) -> pd.DataFrame:
 
 def main():
     cfg = load_config()
-    pairs = pairs_from_env() or ["EURUSD=X"]
+    pairs = pairs_from_env() or ["EURUSD"]
     model_path = Path("models/cnn_lstm_fx.keras")
     if not model_path.exists():
         raise FileNotFoundError("Model missing: models/cnn_lstm_fx.keras")
