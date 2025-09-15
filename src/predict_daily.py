@@ -91,22 +91,22 @@ def main():
 
     # Features (same as train/eval)
     feat = df.copy()
-    feat["ret_close_1"] = feat.groupby("Ticker")["Close"].pct_change()
+    feat["ret_close_1"] = feat.groupby("Pair")["Close"].pct_change()
     for w in (5, 10):
-        roll_mean = feat.groupby("Ticker")["Close"].transform(lambda s: s.rolling(w, min_periods=3).mean())
-        roll_std  = feat.groupby("Ticker")["Close"].transform(lambda s: s.rolling(w, min_periods=3).std())
+        roll_mean = feat.groupby("Pair")["Close"].transform(lambda s: s.rolling(w, min_periods=3).mean())
+        roll_std  = feat.groupby("Pair")["Close"].transform(lambda s: s.rolling(w, min_periods=3).std())
         feat[f"z_close_{w}"] = (feat["Close"] - roll_mean) / (roll_std.replace(0, np.nan))
     feat["hl_range"] = (feat["High"] - feat["Low"]) / feat["Close"].replace(0, np.nan)
     feat["body"]     = (feat["Close"] - feat["Open"]) / feat["Close"].replace(0, np.nan)
-    feat["vol_10"]   = feat.groupby("Ticker")["ret_close_1"].transform(lambda s: s.rolling(10, min_periods=5).std())
+    feat["vol_10"]   = feat.groupby("Pair")["ret_close_1"].transform(lambda s: s.rolling(10, min_periods=5).std())
     feat = feat.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     base_cols = ["Open","High","Low","Close","Volume"]
-    extra     = [c for c in feat.columns if c not in base_cols + ["Ticker"]]
+    extra     = [c for c in feat.columns if c not in base_cols + ["Pair"]]
     feature_cols = base_cols + extra
 
     rows_out = []
-    for tkr, g in feat.groupby("Ticker"):
+    for tkr, g in feat.groupby("Pair"):
         g = g.sort_index()
         idx = g.index
 
