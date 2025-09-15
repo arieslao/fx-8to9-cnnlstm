@@ -31,14 +31,14 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     feat = df.copy()
-    feat["ret_close_1"] = feat.groupby("Ticker")["Close"].pct_change()
+    feat["ret_close_1"] = feat.groupby("Pair")["Close"].pct_change()
     for w in (5, 10):
-        roll_mean = feat.groupby("Ticker")["Close"].transform(lambda s: s.rolling(w, min_periods=3).mean())
-        roll_std  = feat.groupby("Ticker")["Close"].transform(lambda s: s.rolling(w, min_periods=3).std())
+        roll_mean = feat.groupby("Pair")["Close"].transform(lambda s: s.rolling(w, min_periods=3).mean())
+        roll_std  = feat.groupby("Pair")["Close"].transform(lambda s: s.rolling(w, min_periods=3).std())
         feat[f"z_close_{w}"] = (feat["Close"] - roll_mean) / (roll_std.replace(0, np.nan))
     feat["hl_range"] = (feat["High"] - feat["Low"]) / feat["Close"].replace(0, np.nan)
     feat["body"]     = (feat["Close"] - feat["Open"]) / feat["Close"].replace(0, np.nan)
-    feat["vol_10"]   = feat.groupby("Ticker")["ret_close_1"].transform(lambda s: s.rolling(10, min_periods=5).std())
+    feat["vol_10"]   = feat.groupby("Pair")["ret_close_1"].transform(lambda s: s.rolling(10, min_periods=5).std())
     feat = feat.replace([np.inf, -np.inf], np.nan).fillna(0.0)
     return feat
 
@@ -46,8 +46,8 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 def build_sequences(features: pd.DataFrame, labels: pd.DataFrame, seq_len: int, cols: list[str]) -> Tuple[np.ndarray, np.ndarray]:
     X, y = [], []
     features, labels = features.sort_index(), labels.sort_index()
-    for tkr, lab_tkr in labels.groupby("Ticker"):
-        f = features[features["Ticker"] == tkr]
+    for tkr, lab_tkr in labels.groupby("Pair"):
+        f = features[features["Pair"] == tkr]
         if f.empty:
             continue
         idx = f.index
@@ -87,7 +87,7 @@ def main():
     set_repro(42); ensure_dirs()
     cfg = load_config()
 
-    pairs = (os.getenv("FX_TICKERS") or "EURUSD=X,GBPUSD=X,USDJPY=X").split(",")
+    pairs = (os.getenv("FX_TICKERS") or "EURUSD,GBPUSD,USDJPY").split(",")
     pairs = [p.strip() for p in pairs if p.strip()]
 
     df = concat_pairs_sheet(
@@ -106,7 +106,7 @@ def main():
 
     feat = build_features(df)
     base = ["Open", "High", "Low", "Close", "Volume"]
-    extra = [c for c in feat.columns if c not in base + ["Ticker"]]
+    extra = [c for c in feat.columns if c not in base + ["Pair"]]
     feature_cols = base + extra
 
     # --- auto-snap labels to nearest 4h grid for 09->13 ---
@@ -114,7 +114,7 @@ def main():
         feat,
         cfg["label"]["target_window"]["start_hour"],  # 9
         cfg["label"]["target_window"]["end_hour"],    # 13
-        ticker_col="Ticker",
+        ticker_col="Pair",
         price_col="Close",
         trading_days_only=cfg["data"]["trading_days_only"],
         duration_hours=4,
