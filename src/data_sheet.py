@@ -1,11 +1,7 @@
-# src/data_sheet.py
 from __future__ import annotations
 
-import os
-import re
-import json
+import os, re, json
 from typing import Iterable, Sequence, Optional
-
 import pandas as pd
 import pytz
 import gspread
@@ -19,8 +15,7 @@ def _sheets_client() -> gspread.Client:
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not raw:
         raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON not set. Add the service-account JSON "
-            "to repo secrets and export it in the workflow env."
+            "GOOGLE_SERVICE_ACCOUNT_JSON is missing. Put your service-account JSON in GitHub Secrets and export it in the workflow env."
         )
     info = json.loads(raw)
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -44,47 +39,35 @@ def _open_sheet(gc: gspread.Client, sheet_id_or_url: str) -> gspread.Spreadsheet
         return gc.open_by_url(sheet_id_or_url)
     except gspread.SpreadsheetNotFound as ex:
         raise RuntimeError(
-            "Google Sheet not found.\n"
-            "• config.yaml → data.sheet.id must be a valid key or full URL\n"
-            "• Share the sheet with your service-account email (Viewer/Editor)\n"
-            f"Original error: {ex}"
+            "Google Sheet not found. Check Sheet ID/URL and share the sheet with your service-account email (Viewer/Editor)."
         ) from ex
 
-def _read_tab_as_dataframe(sheet_id: str, worksheet: str) -> pd.DataFrame:
+def _read_tab(sheet_id: str, worksheet: str) -> pd.DataFrame:
     gc = _sheets_client()
-    sh = _open_sheet(gc, sheet_id)
+    sh = _open_sheet(gc, sheet_id_or_url=sheet_id)
     try:
         ws = sh.worksheet(worksheet)
     except gspread.WorksheetNotFound as ex:
         raise RuntimeError(
-            f"Worksheet/tab '{worksheet}' not found. "
-            f"Available tabs: {[w.title for w in sh.worksheets()]}"
+            f"Worksheet '{worksheet}' not found. Tabs: {[w.title for w in sh.worksheets()]}"
         ) from ex
-
     rows = ws.get_all_values()
     if not rows:
         return pd.DataFrame(columns=REQUIRED_COLS)
     header, *data = rows
     return pd.DataFrame(data, columns=header)
 
-def _coerce_and_filter(df: pd.DataFrame, start: str | None, end: str | None, tz_name: str) -> pd.DataFrame:
-    if df.empty:
-        return df
-
+def _coerce_and_filter(df: pd.DataFrame, start: str|None, end: str|None, tz_name: str) -> pd.DataFrame:
+    if df.empty: return df
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
-        # If the sheet accidentally has "Ticker" from earlier runs, rename to "Pair"
-        if "Ticker" in missing and "Ticker" in df.columns:
-            df = df.rename(columns={"Ticker": "Pair"})
-            missing = [c for c in REQUIRED_COLS if c not in df.columns]
-        if missing:
-            raise RuntimeError(f"Missing expected columns in sheet: {missing}")
+        raise RuntimeError(f"Missing expected columns: {missing}")
 
     df = df.copy()
     df["Timestamp (London)"] = pd.to_datetime(df["Timestamp (London)"], errors="coerce")
-    for c in ["Open", "High", "Low", "Close", "Volume"]:
+    for c in ["Open","High","Low","Close","Volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["Timestamp (London)", "Pair", "Open", "High", "Low", "Close"])
+    df = df.dropna(subset=["Timestamp (London)","Pair","Open","High","Low","Close"])
 
     tz = pytz.timezone(tz_name)
     idx = pd.DatetimeIndex(df["Timestamp (London)"]).tz_localize(
@@ -93,25 +76,23 @@ def _coerce_and_filter(df: pd.DataFrame, start: str | None, end: str | None, tz_
     df.index = idx
     df = df.sort_index()
 
-    if start:
-        df = df[df.index >= pd.Timestamp(start, tz=tz)]
-    if end:
-        df = df[df.index <= pd.Timestamp(end, tz=tz)]
+    if start: df = df[df.index >= pd.Timestamp(start, tz=tz)]
+    if end:   df = df[df.index <= pd.Timestamp(end, tz=tz)]
 
-    return df[["Pair", "Open", "High", "Low", "Close", "Volume"]]
+    return df[["Pair","Open","High","Low","Close","Volume"]]
 
 def concat_pairs_sheet(
     pairs: Iterable[str],
-    start: Optional[str],
-    end: Optional[str],
+    start: str|None,
+    end: str|None,
     tz_name: str,
     sheet_id: str,
     worksheet: str,
 ) -> pd.DataFrame:
-    raw = _read_tab_as_dataframe(sheet_id, worksheet)
+    raw = _read_tab(sheet_id, worksheet)
     if raw.empty:
-        return pd.DataFrame(columns=["Pair", "Open", "High", "Low", "Close", "Volume"])
-    df = _coerce_and_filter(raw, start=start, end=end, tz_name=tz_name)
+        return pd.DataFrame(columns=["Pair","Open","High","Low","Close","Volume"])
+    df = _coerce_and_filter(raw, start, end, tz_name)
     want = [p.strip() for p in pairs if p and p.strip()]
     if want:
         df = df[df["Pair"].isin(want)]
@@ -121,10 +102,9 @@ def append_rows(
     sheet_id: str,
     worksheet: str,
     rows: Sequence[Sequence[object]],
-    header: Optional[Sequence[str]] = None,
+    header: Sequence[str] | None = None,
 ) -> None:
-    if not rows:
-        return
+    if not rows: return
     gc = _sheets_client()
     sh = _open_sheet(gc, sheet_id)
     try:
