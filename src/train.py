@@ -1,97 +1,42 @@
-# src/train.py
 from __future__ import annotations
+
 import os, json
 from pathlib import Path
-from typing import Dict, Tuple
-
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
-
-from src.utils import load_config
+import keras
+from keras import layers, models, optimizers
 from src.data_sheet import concat_pairs_sheet
-from src.features import to_interval
-from src.labels import make_window_label_auto
+from src.labels import make_9to13_label
+from src.windows import build_sequences
 
+def load_config() -> dict:
+    import yaml
+    with open("config.yaml","r") as f:
+        return yaml.safe_load(f)
 
-def set_repro(seed=42):
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    tf.random.set_seed(seed)
-    np.random.set_seed(seed)
+def pairs_from_env() -> list[str]:
+    raw = os.getenv("FX_PAIRS") or os.getenv("FX_TICKERS") or ""
+    return [p.strip() for p in raw.split(",") if p.strip()]
 
-
-def ensure_dirs():
-    Path("models").mkdir(parents=True, exist_ok=True)
-    Path("artifacts").mkdir(parents=True, exist_ok=True)
-
-
-def build_features(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    feat = df.copy()
-    feat["ret_close_1"] = feat.groupby("Pair")["Close"].pct_change()
-    for w in (5, 10):
-        roll_mean = feat.groupby("Pair")["Close"].transform(lambda s: s.rolling(w, min_periods=3).mean())
-        roll_std  = feat.groupby("Pair")["Close"].transform(lambda s: s.rolling(w, min_periods=3).std())
-        feat[f"z_close_{w}"] = (feat["Close"] - roll_mean) / (roll_std.replace(0, np.nan))
-    feat["hl_range"] = (feat["High"] - feat["Low"]) / feat["Close"].replace(0, np.nan)
-    feat["body"]     = (feat["Close"] - feat["Open"]) / feat["Close"].replace(0, np.nan)
-    feat["vol_10"]   = feat.groupby("Pair")["ret_close_1"].transform(lambda s: s.rolling(10, min_periods=5).std())
-    feat = feat.replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    return feat
-
-
-def build_sequences(features: pd.DataFrame, labels: pd.DataFrame, seq_len: int, cols: list[str]) -> Tuple[np.ndarray, np.ndarray]:
-    X, y = [], []
-    features, labels = features.sort_index(), labels.sort_index()
-    for tkr, lab_tkr in labels.groupby("Pair"):
-        f = features[features["Pair"] == tkr]
-        if f.empty:
-            continue
-        idx = f.index
-        for ts, row in lab_tkr.iterrows():
-            end_loc = idx.searchsorted(ts)  # strictly before label time
-            start = end_loc - seq_len
-            if start < 0:
-                continue
-            win = f.iloc[start:end_loc]
-            if len(win) != seq_len:
-                continue
-            X.append(win[cols].to_numpy(dtype=np.float32))
-            y.append(int(row["label"]))
-    if not X:
-        return np.empty((0, seq_len, len(cols)), dtype=np.float32), np.empty((0,), dtype=np.int32)
-    return np.stack(X), np.array(y, dtype=np.int32)
-
-
-def build_cnn_lstm(steps: int, feats: int, cfg: Dict) -> keras.Model:
-    inp = keras.Input(shape=(steps, feats))
-    x = layers.Conv1D(cfg["model"]["cnn_filters"], cfg["model"]["cnn_kernel"], padding="causal", activation="relu")(inp)
-    x = layers.Dropout(cfg["model"]["dropout"])(x)
-    x = layers.LSTM(cfg["model"]["lstm_units"])(x)
-    x = layers.Dropout(cfg["model"]["dropout"])(x)
-    x = layers.Dense(64, activation="relu")(x)
-    out = layers.Dense(1, activation="sigmoid")(x)
-    model = keras.Model(inp, out)
-    model.compile(
-        optimizer=keras.optimizers.Adam(cfg["model"]["lr"]),
-        loss="binary_crossentropy",
-        metrics=[keras.metrics.BinaryAccuracy(name="acc")],
-    )
-    return model
-
+def make_features(df: pd.DataFrame) -> pd.DataFrame:
+    # Basic returns and ranges; you can expand later
+    out = df.copy()
+    out["ret"] = out["Close"].pct_change()
+    out["hl_range"] = (out["High"] - out["Low"]) / out["Open"]
+    out = out.dropna()
+    return out
 
 def main():
-    set_repro(42); ensure_dirs()
     cfg = load_config()
+    Path("models").mkdir(exist_ok=True)
+    Path("artifacts").mkdir(exist_ok=True)
 
-    pairs = (os.getenv("FX_TICKERS") or "EURUSD,GBPUSD,USDJPY").split(",")
-    pairs = [p.strip() for p in pairs if p.strip()]
+    pairs = pairs_from_env() or ["EURUSD=X","GBPUSD=X","USDJPY=X"]
+    print("[INFO] Training on pairs:", pairs)
 
     df = concat_pairs_sheet(
-        tickers=pairs,
+        pairs=pairs,
         start=cfg["data"]["train_start"],
         end=cfg["data"]["train_end"],
         tz_name=cfg["data"]["timezone"],
@@ -99,50 +44,63 @@ def main():
         worksheet=cfg["data"]["sheet"]["worksheet"],
     )
     if df.empty:
-        raise SystemExit("No rows from sheet for training window.")
+        raise SystemExit("No training rows from sheet. Check Sheet ID/tab, share, and date range.")
 
-    # passthrough for 4h, kept for future changes
-    df = to_interval(df, cfg["data"]["interval"], cfg["data"]["timezone"])
+    df_feat = make_features(df)
+    # Build labels only on 09:00 bars; other rows are NaN
+    y_all = make_9to13_label(df_feat)
+    df_feat["label"] = y_all
 
-    feat = build_features(df)
-    base = ["Open", "High", "Low", "Close", "Volume"]
-    extra = [c for c in feat.columns if c not in base + ["Pair"]]
-    feature_cols = base + extra
-
-    # --- auto-snap labels to nearest 4h grid for 09->13 ---
-    labels = make_window_label_auto(
-        feat,
-        cfg["label"]["target_window"]["start_hour"],  # 9
-        cfg["label"]["target_window"]["end_hour"],    # 13
-        ticker_col="Pair",
-        price_col="Close",
-        trading_days_only=cfg["data"]["trading_days_only"],
-        duration_hours=4,
-        snap_tolerance_hours=2.1,
-    )
-    if labels.empty:
-        raise SystemExit("No labels for 09→13 (after snapping). Check that your 4h grid is near those hours.")
+    # Keep only rows that have a label (i.e., 09:00 bars)
+    df_lab = df_feat.dropna(subset=["label"]).copy()
+    df_lab["label"] = df_lab["label"].astype(int)
 
     seq_len = int(cfg["model"]["seq_len"])
-    X, y = build_sequences(feat, labels, seq_len, feature_cols)
-    if len(X) == 0:
-        raise SystemExit("No train sequences. Reduce seq_len or verify date coverage.")
+    feature_cols = ["Open","High","Low","Close","Volume","ret","hl_range"]
 
-    model = build_cnn_lstm(seq_len, len(feature_cols), cfg)
-    hist = model.fit(
-        X, y,
-        batch_size=cfg["train"]["batch_size"],
-        epochs=cfg["train"]["epochs"],
-        validation_split=cfg["train"]["validation_split"],
-        shuffle=cfg["train"]["shuffle"],
-        verbose=1,
+    # Build windows over *all* 4H rows, but only keep windows whose END is a labeled row
+    X, t_end, pairs_list = build_sequences(df_feat, seq_len=seq_len, feature_cols=feature_cols)
+    if len(t_end) == 0:
+        raise SystemExit("No windows built. Check seq_len and data volume.")
+    meta = pd.DataFrame({"t_end": t_end, "Pair": pairs_list})
+    meta = meta.set_index(["t_end","Pair"])
+    targets = df_lab.set_index(df_lab.index.rename("t_end")).set_index("Pair", append=True)["label"]
+
+    # align X with y via index
+    idx = meta.index.intersection(targets.index)
+    keep = meta.index.get_indexer(idx)
+    X = X[keep]
+    y = targets.loc[idx].to_numpy(dtype="int32")
+
+    if X.shape[0] == 0:
+        raise SystemExit("After aligning windows with labels, nothing to train on.")
+
+    # Build CNN-LSTM
+    inputs = layers.Input(shape=(seq_len, len(feature_cols)))
+    x = layers.Conv1D(32, 3, padding="causal", activation="relu")(inputs)
+    x = layers.Dropout(0.2)(x)
+    x = layers.LSTM(64)(x)
+    x = layers.Dropout(0.2)(x)
+    outputs = layers.Dense(1, activation="sigmoid")(x)
+    model = models.Model(inputs, outputs)
+    model.compile(
+        optimizer=optimizers.Adam(learning_rate=float(cfg["model"]["lr"])),
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
     )
 
-    model.save("models/cnn_lstm_fx.keras")
-    with open("artifacts/train_history.json", "w") as f: json.dump(hist.history, f)
-    with open("artifacts/feature_columns.txt", "w") as f: f.write("\n".join(feature_cols))
-    print("[OK] Trained & saved to models/cnn_lstm_fx.keras (auto-snapped 09→13 labels).")
+    model.fit(
+        X, y,
+        batch_size=int(cfg["train"]["batch_size"]),
+        epochs=int(cfg["train"]["epochs"]),
+        validation_split=float(cfg["train"]["validation_split"]),
+        shuffle=True,
+        verbose=2,
+    )
 
+    out_path = Path("models") / "cnn_lstm_fx.keras"
+    model.save(out_path)
+    print(f"[OK] Saved {out_path}")
 
 if __name__ == "__main__":
     main()
