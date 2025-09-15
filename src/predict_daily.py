@@ -26,17 +26,30 @@ def _append_preds_rows(sheet_id: str, worksheet: str, rows: list[list]):
     gc = _sheets_client()
     ws = gc.open_by_key(sheet_id).worksheet(worksheet)
     if ws.acell("A1").value is None:
-        ws.append_row(["RunId","as_of_london","pair","target_start","target_end","prob_up","pred_label"])
+        ws.append_row(["RunId","as_of_london","pair","snapped_start","snapped_end","desired_start","desired_end","prob_up","pred_label"])
     ws.append_rows(rows, value_input_option="USER_ENTERED")
 
 def _now_london():
     return datetime.now(pytz.timezone("Europe/London"))
 
+def _nearest_index_time(idx: pd.DatetimeIndex, target: pd.Timestamp, tol_hours: float = 2.1) -> datetime | None:
+    pos = idx.searchsorted(target)
+    best_ts, best_diff = None, None
+    for j in (pos - 1, pos, pos + 1):
+        if 0 <= j < len(idx):
+            ts = idx[j]
+            diff = abs(ts - target)
+            if best_diff is None or diff < best_diff:
+                best_ts, best_diff = ts, diff
+    if best_ts is not None and best_diff <= pd.Timedelta(hours=tol_hours):
+        return best_ts.to_pydatetime()
+    return None
+
 def main():
     cfg = load_config()
     os.makedirs("artifacts", exist_ok=True)
 
-    # 1) Load model
+    # Load model (.keras preferred)
     model_path = Path("models/cnn_lstm_fx.keras")
     if not model_path.exists():
         alt = Path("models/cnn_lstm_fx.h5")
@@ -44,26 +57,23 @@ def main():
         else: raise FileNotFoundError("Model missing: models/cnn_lstm_fx.keras (or .h5)")
     model = keras.saving.load_model(model_path)
 
-    # 2) Timing
     tz = pytz.timezone(cfg["data"]["timezone"])
-    now_lon = _now_london()
-    as_of = now_lon.replace(minute=0, second=0, microsecond=0)
+    as_of = _now_london().replace(minute=0, second=0, microsecond=0)
 
-    # We intend to predict the window 09:00 -> 13:00 today
     start_hour = int(cfg["label"]["target_window"]["start_hour"])  # 9
     end_hour   = int(cfg["label"]["target_window"]["end_hour"])    # 13
-    start_ts = as_of.replace(hour=start_hour)
-    end_ts   = as_of.replace(hour=end_hour)
-    if as_of.hour >= end_hour:   # if run after the window today, roll to next business day
-        start_ts += timedelta(days=1)
-        end_ts   += timedelta(days=1)
+    desired_start = as_of.replace(hour=start_hour)
+    desired_end   = as_of.replace(hour=end_hour)
+    # if running after end-hour, roll to next business day
+    if as_of.hour >= end_hour:
+        desired_start += timedelta(days=1)
+        desired_end   += timedelta(days=1)
 
-    # 3) Pull enough history (lookback + a buffer day)
     seq_len = int(cfg["model"]["seq_len"])
     lookback_hours = int(cfg["data"]["lookback_hours"])
     hist_hours = lookback_hours + 48
-    start_hist = (start_ts - timedelta(hours=hist_hours)).strftime("%Y-%m-%d")
-    end_hist   = (end_ts + timedelta(hours=4)).strftime("%Y-%m-%d")
+    start_hist = (desired_start - timedelta(hours=hist_hours)).strftime("%Y-%m-%d")
+    end_hist   = (desired_end + timedelta(hours=4)).strftime("%Y-%m-%d")
 
     pairs = (os.getenv("FX_TICKERS") or "EURUSD=X,GBPUSD=X,USDJPY=X").split(",")
     pairs = [p.strip() for p in pairs if p.strip()]
@@ -79,9 +89,9 @@ def main():
     if df.empty:
         raise SystemExit("No rows from sheet for prediction window.")
 
-    # 4) Interval passthrough + features (same transforms as training)
     df = to_interval(df, cfg["data"]["interval"], cfg["data"]["timezone"])
 
+    # Features (same as train/eval)
     feat = df.copy()
     feat["ret_close_1"] = feat.groupby("Ticker")["Close"].pct_change()
     for w in (5, 10):
@@ -97,41 +107,57 @@ def main():
     extra     = [c for c in feat.columns if c not in base_cols + ["Ticker"]]
     feature_cols = base_cols + extra
 
-    # 5) Build latest sequence per pair ending strictly before start_ts (no leakage)
     rows_out = []
-    for tkr, f in feat.groupby("Ticker"):
-        f = f.sort_index()
-        idx = f.index
-        end_loc = idx.searchsorted(start_ts)  # first index >= start_ts
-        start_loc = end_loc - seq_len
-        if start_loc < 0 or end_loc <= 0:  # not enough history
+    for tkr, g in feat.groupby("Ticker"):
+        g = g.sort_index()
+        idx = g.index
+
+        snapped_start = _nearest_index_time(idx, pd.Timestamp(desired_start, tz=tz))
+        snapped_end   = _nearest_index_time(idx, pd.Timestamp(desired_end, tz=tz))
+
+        # Prefer the "next" bar after snapped_start if it's ~4h ahead
+        if snapped_start is not None:
+            pos = idx.searchsorted(pd.Timestamp(snapped_start, tz=tz))
+            if pos + 1 < len(idx):
+                candidate_end = idx[pos + 1].to_pydatetime()
+                delta_h = (candidate_end - snapped_start).total_seconds() / 3600.0
+                if 2.0 <= delta_h <= 6.0:
+                    snapped_end = candidate_end
+
+        if snapped_start is None or snapped_end is None or snapped_end <= snapped_start:
             continue
-        window = f.iloc[start_loc:end_loc]
+
+        # build latest sequence ending strictly before snapped_start (no leakage)
+        end_loc = idx.searchsorted(pd.Timestamp(snapped_start, tz=tz))
+        start_loc = end_loc - seq_len
+        if start_loc < 0 or end_loc <= 0:
+            continue
+        window = g.iloc[start_loc:end_loc]
         if len(window) != seq_len:
             continue
+
         X = window[feature_cols].to_numpy(dtype=np.float32)[None, ...]
         prob_up = float(model.predict(X, verbose=0).reshape(-1)[0])
-        pred    = 1 if prob_up >= 0.5 else 0
+        pred = 1 if prob_up >= 0.5 else 0
+
         rows_out.append([
             os.getenv("GITHUB_RUN_ID", "local"),
             as_of.isoformat(),
             tkr,
-            start_ts.isoformat(),
-            end_ts.isoformat(),
+            pd.Timestamp(snapped_start, tz=tz).isoformat(),
+            pd.Timestamp(snapped_end,   tz=tz).isoformat(),
+            pd.Timestamp(desired_start, tz=tz).isoformat(),
+            pd.Timestamp(desired_end,   tz=tz).isoformat(),
             round(prob_up, 6),
             pred,
         ])
 
     if not rows_out:
-        raise SystemExit("No pairs had sufficient history to score a 09→13 prediction.")
+        raise SystemExit("No pairs had sufficient history to score snapped 09→13 predictions.")
 
-    # 6) Write to Sheet tab 'preds_8to9' (kept name for continuity)
-    _append_preds_rows(
-        cfg["data"]["sheet"]["id"],
-        "preds_8to9",
-        rows_out
-    )
-    print(f"[OK] Wrote {len(rows_out)} predictions to preds_8to9.")
+    _append_preds_rows(cfg["data"]["sheet"]["id"], "preds_8to9", rows_out)
+    print(f"[OK] Wrote {len(rows_out)} predictions (snapped 09→13) to preds_8to9.")
+
 
 if __name__ == "__main__":
     main()
