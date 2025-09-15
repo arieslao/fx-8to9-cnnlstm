@@ -12,18 +12,6 @@ def make_window_label(
     price_col: str = "Close",
     trading_days_only: bool = True,
 ) -> pd.DataFrame:
-    """
-    Create binary labels for (start_hour -> end_hour) based on Close price change.
-
-    Input:
-      - df: tz-aware DateTimeIndex aligned to Europe/London is recommended.
-      - columns include [ticker_col, price_col].
-
-    Output:
-      DataFrame indexed by the *start_hour* timestamp with columns:
-        ['Ticker','label','y','Close_start','Close_end','delta']
-      where label/y = 1 if (Close_end - Close_start) > threshold else 0
-    """
     if df.empty:
         return pd.DataFrame(columns=["Ticker","label","y","Close_start","Close_end","delta"])
 
@@ -49,7 +37,6 @@ def make_window_label(
     left  = dfa.rename(columns={price_col: "Close_start"})
     right = dfb.rename(columns={price_col: "Close_end"})
 
-    # reset and give a stable timestamp column name 'ts' for the left (start) time
     left_reset = left.reset_index()
     idx_name   = left.index.name or left_reset.columns[0]
     left_reset = left_reset.rename(columns={idx_name: "ts"})
@@ -71,6 +58,6 @@ def make_window_label(
     out.index.name = None
     return out
 
-# Backwards-compat alias (08->09)
+# Back-compat alias (not used now, but harmless to keep)
 def make_8to9_label(df, *args, **kwargs):
     return make_window_label(df, 8, 9, *args, **kwargs)
