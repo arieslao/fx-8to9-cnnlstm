@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 import json
-from typing import Optional, List
+from typing import List
 
 import pandas as pd
 import numpy as np
@@ -11,7 +11,6 @@ import pytz
 
 import gspread
 from google.oauth2.service_account import Credentials
-from gspread_dataframe import get_as_dataframe
 
 
 def _service_account_client() -> gspread.Client:
@@ -52,6 +51,24 @@ def _open_sheet(gc: gspread.Client, sheet_id_or_url: str):
         ) from ex
 
 
+def _worksheet_to_dataframe(ws) -> pd.DataFrame:
+    """
+    Read the entire worksheet with gspread (no gspread_dataframe dependency)
+    and convert it to a pandas DataFrame using the first row as headers.
+    """
+    values = ws.get_all_values()  # list[list[str]]
+    if not values:
+        return pd.DataFrame()
+
+    header = values[0]
+    rows = values[1:]
+
+    # Build DataFrame; keep empty strings as NaN for numeric coercion later
+    df = pd.DataFrame(rows, columns=header)
+    df.replace({"": pd.NA}, inplace=True)
+    return df
+
+
 def _read_entire_sheet(sheet_id: str, worksheet: str) -> pd.DataFrame:
     gc = _service_account_client()
     sh = _open_sheet(gc, sheet_id)
@@ -62,8 +79,7 @@ def _read_entire_sheet(sheet_id: str, worksheet: str) -> pd.DataFrame:
             f"Worksheet/tab '{worksheet}' not found. Check the tab name in config.yaml."
         ) from ex
 
-    # Pull all rows with header inference; keep empty cells as NaN.
-    df = get_as_dataframe(ws, evaluate_formulas=True, dtype=None, header=0)
+    df = _worksheet_to_dataframe(ws)
     # Drop rows that are entirely NaN.
     df = df.dropna(how="all")
     return df
